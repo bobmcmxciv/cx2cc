@@ -1,5 +1,7 @@
 # cx2cc
 
+[中文文档](README.zh-CN.md) | English
+
 cx2cc is a local compatibility proxy that exposes a subset of the Anthropic Messages API and forwards requests to an OpenAI Chat Completions compatible upstream.
 
 It is intended for local use with Claude Code, CC Switch, or similar tools that can point Anthropic-compatible traffic at a custom base URL.
