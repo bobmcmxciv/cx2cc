@@ -95,7 +95,7 @@ def test_nonstream_success(server_module, monkeypatch):
 
 def test_fallback_keys_retry_once_each(server_module, monkeypatch):
     monkeypatch.setenv("CX2CC_UPSTREAM_BASE_URL", "https://example.test/v1")
-    server_module._FALLBACK_API_KEYS[:] = ["bad", "good"]
+    monkeypatch.setenv("CX2CC_UPSTREAM_API_KEYS", "bad,good")
     server_module._key_errors.clear()
     server_module._key_index = 0
 

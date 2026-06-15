@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import socket
 import subprocess
@@ -7,7 +9,13 @@ from pathlib import Path
 from urllib.request import urlopen
 
 
-ROOT = Path(__file__).resolve().parent
+def app_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+ROOT = app_dir()
 LOG_DIR = ROOT / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 
@@ -38,7 +46,20 @@ def port_open() -> bool:
         return False
 
 
-def main() -> int:
+def serve() -> int:
+    from server import main as server_main
+
+    server_main()
+    return 0
+
+
+def _serve_command() -> list[str]:
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "serve"]
+    return [sys.executable, str(Path(__file__).resolve()), "serve"]
+
+
+def start() -> int:
     if health_ok():
         log(f"cx2cc already healthy on {HOST}:{PORT}")
         return 0
@@ -50,24 +71,53 @@ def main() -> int:
     stdout = open(LOG_DIR / "cx2cc.out.log", "ab")
     stderr = open(LOG_DIR / "cx2cc.err.log", "ab")
     creationflags = 0
+    close_fds = True
     if os.name == "nt":
         creationflags = (
             subprocess.DETACHED_PROCESS
             | subprocess.CREATE_NEW_PROCESS_GROUP
             | subprocess.CREATE_NO_WINDOW
         )
+        close_fds = False
 
     proc = subprocess.Popen(
-        [sys.executable, "server.py"],
+        _serve_command(),
         cwd=str(ROOT),
         stdin=subprocess.DEVNULL,
         stdout=stdout,
         stderr=stderr,
-        close_fds=False,
+        close_fds=close_fds,
         creationflags=creationflags,
     )
     log(f"started cx2cc pid={proc.pid} on {HOST}:{PORT}")
     return 0
+
+
+def health() -> int:
+    if health_ok():
+        print(f"cx2cc is healthy on http://{HOST}:{PORT}")
+        return 0
+    print(f"cx2cc is not responding on http://{HOST}:{PORT}")
+    return 1
+
+
+def usage() -> None:
+    print("Usage: cx2cc [serve|start|health]")
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = list(sys.argv[1:] if argv is None else argv)
+    command = args[0].lower() if args else "serve"
+
+    if command == "serve":
+        return serve()
+    if command == "start":
+        return start()
+    if command == "health":
+        return health()
+
+    usage()
+    return 2
 
 
 if __name__ == "__main__":

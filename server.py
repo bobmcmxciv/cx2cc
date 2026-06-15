@@ -6,7 +6,9 @@ from __future__ import annotations
 import logging
 import os
 import re
+import sys
 import threading
+from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
@@ -14,16 +16,19 @@ from flask import Flask, Response, jsonify, request
 
 from translator import UPSTREAM_MODEL, stream_translate, translate_request, translate_response
 
-load_dotenv(verbose=False)
+
+def app_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+APP_DIR = app_dir()
+load_dotenv(APP_DIR / ".env", verbose=False)
 
 LISTEN_PORT = int(os.environ.get("CX2CC_PORT", "8901"))
 LISTEN_HOST = os.environ.get("CX2CC_HOST", "127.0.0.1")
 
-_FALLBACK_RAW_KEYS = os.environ.get(
-    "CX2CC_UPSTREAM_API_KEYS",
-    os.environ.get("CX2CC_UPSTREAM_API_KEY", ""),
-)
-_FALLBACK_API_KEYS = [k.strip() for k in re.split(r"[,\n]+", _FALLBACK_RAW_KEYS) if k.strip()]
 _key_lock = threading.Lock()
 _key_index = 0
 _key_errors: dict[str, int] = {}
@@ -35,6 +40,14 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("cx2cc")
+
+
+def _fallback_api_keys() -> list[str]:
+    raw_keys = os.environ.get(
+        "CX2CC_UPSTREAM_API_KEYS",
+        os.environ.get("CX2CC_UPSTREAM_API_KEY", ""),
+    )
+    return [k.strip() for k in re.split(r"[,\n]+", raw_keys) if k.strip()]
 
 
 def _get_upstream_base_url() -> str | None:
@@ -49,30 +62,31 @@ def _chat_url() -> str | None:
     return f"{base_url}/chat/completions"
 
 
-def _get_fallback_key() -> str | None:
+def _get_fallback_key(keys: list[str]) -> str | None:
     global _key_index
-    if not _FALLBACK_API_KEYS:
+    if not keys:
         return None
     with _key_lock:
-        start = _key_index
-        n = len(_FALLBACK_API_KEYS)
+        start = _key_index % len(keys)
+        _key_index = start
         while True:
-            key = _FALLBACK_API_KEYS[_key_index]
-            _key_index = (_key_index + 1) % n
+            key = keys[_key_index]
+            _key_index = (_key_index + 1) % len(keys)
             if _key_errors.get(key, 0) < 3:
                 return key
             if _key_index == start:
                 _key_errors.clear()
-                return _FALLBACK_API_KEYS[0]
+                return keys[0]
 
 
 def _candidate_keys(request_key: str) -> list[str]:
+    fallback_keys = _fallback_api_keys()
     keys: list[str] = []
     if request_key:
         keys.append(request_key)
 
-    for _ in range(len(_FALLBACK_API_KEYS)):
-        key = _get_fallback_key()
+    for _ in range(len(fallback_keys)):
+        key = _get_fallback_key(fallback_keys)
         if key and key not in keys:
             keys.append(key)
 
@@ -283,8 +297,13 @@ def _forward_err(upstream):
     return _err(upstream.status_code, f"Upstream: {msg}")
 
 
-if __name__ == "__main__":
+def main() -> None:
     upstream = _get_upstream_base_url()
     log.info("cx2cc starting on %s:%s", LISTEN_HOST, LISTEN_PORT)
+    log.info("App dir: %s", APP_DIR)
     log.info("Upstream: %s -> %s", upstream or "UNCONFIGURED", UPSTREAM_MODEL)
     app.run(host=LISTEN_HOST, port=LISTEN_PORT, debug=False, threaded=True)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.2.0
+
+- Added Windows EXE packaging support via PyInstaller.
+- Added `cx2cc.exe serve` and `cx2cc.exe start` modes.
+- Updated Windows scripts to prefer the packaged executable and fall back to source mode.
+- Added Windows release zip build script and checksum generation.
+
 ## v0.1.0
 
 - Initial public-ready release.

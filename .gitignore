@@ -9,6 +9,9 @@ __pycache__/
 htmlcov/
 logs/
 *.log
+build/
+dist/
+*.spec
 .DS_Store
 .idea/
 .vscode/

@@ -24,7 +24,7 @@ OpenAI-compatible upstream
 - Text, image, tool use, and tool result translation for common Claude Code flows
 - Optional fallback upstream API keys with finite retry
 - macOS LaunchAgent helper
-- Windows foreground, silent, and Startup-folder helper scripts
+- Windows EXE package, foreground, silent, and Startup-folder helper scripts
 
 ## Compatibility scope
 
@@ -50,11 +50,35 @@ Known limitations:
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.10+ when running from source. Windows release zips include `cx2cc.exe` and do not require Python.
 - An OpenAI Chat Completions compatible upstream endpoint
 - An upstream API key, passed either through `x-api-key` or configured as a fallback environment variable
 
-## Installation
+## Windows EXE quick start
+
+Download `cx2cc-windows-x64.zip` from the GitHub Release page, unzip it, then copy `.env.example` to `.env` beside `cx2cc.exe`.
+
+```powershell
+copy .env.example .env
+notepad .env
+.\cx2cc.exe serve
+```
+
+For background mode:
+
+```powershell
+.\cx2cc.exe start
+```
+
+Health check:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8901/health
+```
+
+Logs are written to `logs\` beside `cx2cc.exe`.
+
+## Source installation
 
 ```bash
 git clone https://github.com/<owner>/cx2cc.git
@@ -81,10 +105,10 @@ CX2CC_UPSTREAM_API_KEYS=key1,key2
 
 If your client passes `x-api-key`, the request header key is used before any fallback key.
 
-## Run locally
+## Run from source
 
 ```bash
-python server.py
+python start-cx2cc.py serve
 ```
 
 Health check:
@@ -135,16 +159,30 @@ The script dynamically writes `~/Library/LaunchAgents/com.cx2cc.proxy.plist` for
 
 ## Windows usage
 
+If `cx2cc.exe` is present, the Windows helper scripts use it automatically. In a source checkout without `cx2cc.exe`, they fall back to Python.
+
 Foreground mode:
 
 ```bat
 run.bat
 ```
 
+or directly:
+
+```powershell
+.\cx2cc.exe serve
+```
+
 Detached helper:
 
 ```bat
 start-cx2cc.bat
+```
+
+or directly:
+
+```powershell
+.\cx2cc.exe start
 ```
 
 Silent PowerShell helper:
@@ -165,7 +203,7 @@ Remove Startup-folder autostart:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\uninstall-startup.ps1
 ```
 
-The Windows scripts use their own location to find the repository and try `py -3` first, then `python`. They do not rely on a hardcoded Python install path.
+The Windows scripts use their own location to find the release/source directory. Release packages use `cx2cc.exe`; source checkouts try `py -3` first, then `python`. They do not rely on a hardcoded Python install path.
 
 ## Environment variables
 
@@ -184,9 +222,17 @@ python -m pytest
 python -m compileall server.py translator.py start-cx2cc.py
 ```
 
+Build the Windows EXE on Windows:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\build-exe.ps1
+```
+
+The build script creates `dist\cx2cc-windows-x64.zip` and a SHA256 file.
+
 ## Security notes
 
-- Do not commit `.env`, logs, API keys, or generated startup files.
+- Do not commit or upload `.env`, logs, API keys, or generated startup files.
 - The proxy forwards prompts and tool results to the configured upstream provider.
 - By default, cx2cc binds to localhost only.
 - Logs intentionally avoid printing full API keys; keep `logs/` private anyway because upstream error bodies may contain sensitive request context.

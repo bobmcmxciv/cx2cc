@@ -24,7 +24,7 @@ OpenAI-compatible upstream
 - 支持 Claude Code 常见流程里的文本、图片、工具调用和工具结果转换
 - 支持可选的上游备用 API Key，并带有限重试
 - 提供 macOS LaunchAgent 管理脚本
-- 提供 Windows 前台启动、静默启动和开机自启动脚本
+- 提供 Windows EXE 包、前台启动、静默启动和开机自启动脚本
 
 ## 兼容范围
 
@@ -50,11 +50,35 @@ cx2cc 不是 Anthropic 官方 API，也不实现 Anthropic API 的全部功能�
 
 ## 环境要求
 
-- Python 3.10+
+- 源码运行需要 Python 3.10+。Windows release zip 内含 `cx2cc.exe`，普通用户不需要安装 Python。
 - 一个 OpenAI Chat Completions 兼容的上游接口
 - 一个上游 API Key，可通过请求头 `x-api-key` 传入，也可配置为环境变量 fallback key
 
-## 安装
+## Windows EXE 快速开始
+
+从 GitHub Release 页面下载 `cx2cc-windows-x64.zip`，解压后把 `.env.example` 复制为与 `cx2cc.exe` 同目录下的 `.env`。
+
+```powershell
+copy .env.example .env
+notepad .env
+.\cx2cc.exe serve
+```
+
+后台启动：
+
+```powershell
+.\cx2cc.exe start
+```
+
+健康检查：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8901/health
+```
+
+日志会写入 `cx2cc.exe` 同目录下的 `logs\`。
+
+## 源码安装
 
 ```bash
 git clone https://github.com/<owner>/cx2cc.git
@@ -81,10 +105,10 @@ CX2CC_UPSTREAM_API_KEYS=key1,key2
 
 如果客户端请求里带了 `x-api-key`，请求头里的 key 会优先于 `.env` 中的 fallback key。
 
-## 本地运行
+## 从源码运行
 
 ```bash
-python server.py
+python start-cx2cc.py serve
 ```
 
 健康检查：
@@ -135,16 +159,30 @@ chmod +x cx2cc.sh cx2cc-wrapper.sh
 
 ## Windows 使用
 
+如果当前目录存在 `cx2cc.exe`，Windows 辅助脚本会自动使用 exe；如果是没有 exe 的源码目录，则 fallback 到 Python。
+
 前台运行：
 
 ```bat
 run.bat
 ```
 
+或直接运行：
+
+```powershell
+.\cx2cc.exe serve
+```
+
 后台启动辅助脚本：
 
 ```bat
 start-cx2cc.bat
+```
+
+或直接运行：
+
+```powershell
+.\cx2cc.exe start
 ```
 
 静默 PowerShell 启动：
@@ -165,7 +203,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\install-st
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\uninstall-startup.ps1
 ```
 
-Windows 脚本会根据脚本自身位置定位仓库目录，并优先尝试 `py -3`，再尝试 `python`，不依赖固定 Python 安装路径。
+Windows 脚本会根据脚本自身位置定位 release/源码目录。release 包优先使用 `cx2cc.exe`；源码目录会优先尝试 `py -3`，再尝试 `python`，不依赖固定 Python 安装路径。
 
 ## 环境变量
 
@@ -184,9 +222,17 @@ python -m pytest
 python -m compileall server.py translator.py start-cx2cc.py
 ```
 
+在 Windows 上构建 EXE：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\build-exe.ps1
+```
+
+构建脚本会生成 `dist\cx2cc-windows-x64.zip` 和 SHA256 文件。
+
 ## 安全说明
 
-- 不要提交 `.env`、日志、API Key 或生成的自启动文件。
+- 不要提交或上传 `.env`、日志、API Key 或生成的自启动文件。
 - 代理会把 prompts 和工具结果转发给你配置的上游服务商。
 - 默认情况下 cx2cc 只监听 localhost。
 - 日志不会打印完整 API Key；但上游错误体仍可能包含敏感上下文，因此 `logs/` 仍应保持私有。
