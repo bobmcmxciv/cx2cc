@@ -2,8 +2,9 @@
 
 ## v0.2.0
 
+- Added a simple Windows GUI launcher (default when `cx2cc.exe` is double-clicked).
 - Added Windows EXE packaging support via PyInstaller.
-- Added `cx2cc.exe serve` and `cx2cc.exe start` modes.
+- Added `cx2cc.exe gui`, `serve`, `start`, and `health` modes.
 - Updated Windows scripts to prefer the packaged executable and fall back to source mode.
 - Added Windows release zip build script and checksum generation.
 

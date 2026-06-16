@@ -25,7 +25,7 @@ if (-not (Test-Path $Python)) {
 & $Python -m pytest
 & $Python -m compileall server.py translator.py start-cx2cc.py
 
-& $Python -m PyInstaller --clean --onefile --name cx2cc --console start-cx2cc.py
+& $Python -m PyInstaller --clean --onefile --name cx2cc --windowed start-cx2cc.py
 
 if (Test-Path $ReleaseDir) { Remove-Item $ReleaseDir -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $ReleaseDir | Out-Null

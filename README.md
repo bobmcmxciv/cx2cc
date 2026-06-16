@@ -61,13 +61,23 @@ Download `cx2cc-windows-x64.zip` from the GitHub Release page, unzip it, then co
 ```powershell
 copy .env.example .env
 notepad .env
-.\cx2cc.exe serve
 ```
 
-For background mode:
+Then double-click `cx2cc.exe`. With no arguments it opens a small GUI window where you can:
+
+- See whether the proxy is running and whether the upstream is configured
+- Start the background service
+- Open the config file (`.env`)
+- Open the logs folder
+- Copy the local Base URL
+
+Command-line modes are still available:
 
 ```powershell
-.\cx2cc.exe start
+.\cx2cc.exe gui      # open the GUI (default when double-clicked)
+.\cx2cc.exe serve    # run the server in the foreground
+.\cx2cc.exe start    # start the server in the background
+.\cx2cc.exe health   # print a health check
 ```
 
 Health check:
@@ -76,7 +86,7 @@ Health check:
 Invoke-RestMethod http://127.0.0.1:8901/health
 ```
 
-Logs are written to `logs\` beside `cx2cc.exe`.
+Logs are written to `logs\` beside `cx2cc.exe`. Closing the GUI does not stop a background service started with `start`.
 
 ## Source installation
 

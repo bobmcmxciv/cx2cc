@@ -34,11 +34,28 @@ _key_index = 0
 _key_errors: dict[str, int] = {}
 
 app = Flask(__name__)
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%H:%M:%S",
-)
+
+
+def _configure_logging() -> None:
+    handler: logging.Handler
+    # In a windowed/frozen build sys.stderr/stdout can be None, which makes the
+    # default StreamHandler raise on every log call. Fall back to a log file.
+    if sys.stderr is not None:
+        handler = logging.StreamHandler()
+    else:
+        log_dir = APP_DIR / "logs"
+        try:
+            log_dir.mkdir(exist_ok=True)
+            handler = logging.FileHandler(log_dir / "cx2cc.out.log", encoding="utf-8")
+        except Exception:
+            handler = logging.NullHandler()
+    handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", "%H:%M:%S"))
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.addHandler(handler)
+
+
+_configure_logging()
 log = logging.getLogger("cx2cc")
 
 

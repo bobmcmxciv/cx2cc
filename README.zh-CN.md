@@ -61,13 +61,23 @@ cx2cc 不是 Anthropic 官方 API，也不实现 Anthropic API 的全部功能�
 ```powershell
 copy .env.example .env
 notepad .env
-.\cx2cc.exe serve
 ```
 
-后台启动：
+然后双击 `cx2cc.exe`。不带参数时会打开一个简单的 GUI 窗口，可以：
+
+- 查看代理是否在运行、上游是否已配置
+- 启动后台服务
+- 打开配置文件 `.env`
+- 打开日志文件夹
+- 复制本地 Base URL
+
+命令行模式仍然可用：
 
 ```powershell
-.\cx2cc.exe start
+.\cx2cc.exe gui      # 打开 GUI（双击默认行为）
+.\cx2cc.exe serve    # 前台运行服务
+.\cx2cc.exe start    # 后台启动服务
+.\cx2cc.exe health   # 打印健康检查
 ```
 
 健康检查：
@@ -76,7 +86,7 @@ notepad .env
 Invoke-RestMethod http://127.0.0.1:8901/health
 ```
 
-日志会写入 `cx2cc.exe` 同目录下的 `logs\`。
+日志会写入 `cx2cc.exe` 同目录下的 `logs\`。关闭 GUI 不会停止用 `start` 启动的后台服务。
 
 ## 源码安装
 
