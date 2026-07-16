@@ -17,6 +17,13 @@ _status_info() {
 }
 
 install() {
+    if [ ! -x "$ROOT/cx2cc" ] && [ ! -f "$ROOT/start-cx2cc.py" ]; then
+        echo "未找到可执行文件 cx2cc 或源码入口 start-cx2cc.py"
+        exit 1
+    fi
+    if [ ! -f "$ROOT/.env" ]; then
+        echo "提示: 尚未配置 .env，请复制 .env.example 后填写上游地址和 API key"
+    fi
     mkdir -p "$HOME/Library/LaunchAgents" "$ROOT/logs"
     chmod +x "$ROOT/cx2cc-wrapper.sh"
     cat > "$PLIST_PATH" <<EOF
