@@ -23,8 +23,8 @@ OpenAI-compatible upstream
 - 支持流式 SSE 事件转换
 - 支持 Claude Code 常见流程里的文本、图片、工具调用和工具结果转换
 - 支持可选的上游备用 API Key，并带有限重试
-- 提供 macOS LaunchAgent 管理脚本
-- 提供 Windows EXE 包、前台启动、静默启动和开机自启动脚本
+- 提供 macOS arm64 / x86_64 原生可执行包和 LaunchAgent 管理脚本
+- 提供 Windows x64 EXE 包、前台启动、静默启动和开机自启动脚本
 
 ## 兼容范围
 
@@ -50,13 +50,13 @@ cx2cc 不是 Anthropic 官方 API，也不实现 Anthropic API 的全部功能�
 
 ## 环境要求
 
-- 源码运行需要 Python 3.10+。Windows release zip 内含 `cx2cc.exe`，普通用户不需要安装 Python。
+- 源码运行需要 Python 3.10+。Windows 和 macOS release 包均内含原生可执行文件，普通用户不需要安装 Python。
 - 一个 OpenAI Chat Completions 兼容的上游接口
 - 一个上游 API Key，可通过请求头 `x-api-key` 传入，也可配置为环境变量 fallback key
 
 ## Windows EXE 快速开始
 
-从 GitHub Release 页面下载 `cx2cc-windows-x64.zip`，解压后把 `.env.example` 复制为与 `cx2cc.exe` 同目录下的 `.env`。
+从 GitHub Release 页面下载与版本对应的 `cx2cc-vX.Y.Z-windows-x64.zip`，解压后把 `.env.example` 复制为与 `cx2cc.exe` 同目录下的 `.env`。
 
 ```powershell
 copy .env.example .env
@@ -87,6 +87,48 @@ Invoke-RestMethod http://127.0.0.1:8901/health
 ```
 
 日志会写入 `cx2cc.exe` 同目录下的 `logs\`。关闭 GUI 不会停止用 `start` 启动的后台服务。
+
+## macOS 可执行文件快速开始
+
+根据 Mac 架构下载对应文件：Apple 芯片使用 `cx2cc-vX.Y.Z-macos-arm64.tar.gz`，Intel 芯片使用 `cx2cc-vX.Y.Z-macos-x86_64.tar.gz`。解压后进入目录并创建配置：
+
+```bash
+tar -xzf cx2cc-vX.Y.Z-macos-arm64.tar.gz
+cd cx2cc-vX.Y.Z-macos-arm64
+cp .env.example .env
+```
+
+编辑 `.env` 后可直接前台运行：
+
+```bash
+./cx2cc serve
+curl http://127.0.0.1:8901/health
+```
+
+需要后台常驻时，使用包内 LaunchAgent 脚本：
+
+```bash
+./cx2cc.sh install
+./cx2cc.sh start
+./cx2cc.sh status
+```
+
+macOS 产物是原生 raw Mach-O 可执行文件，不是 `.app`，不提供 universal2，并且当前未签名、未公证。首次运行如被 Gatekeeper 阻止，请在确认文件校验值无误后，到“系统设置 → 隐私与安全性”中允许运行；不要从不可信来源下载或绕过校验。
+
+## 校验发布文件
+
+每个压缩包旁均提供 `.sha256` 文件。Windows PowerShell 可执行：
+
+```powershell
+Get-FileHash .\cx2cc-vX.Y.Z-windows-x64.zip -Algorithm SHA256
+Get-Content .\cx2cc-vX.Y.Z-windows-x64.zip.sha256
+```
+
+macOS 可执行：
+
+```bash
+shasum -a 256 -c cx2cc-vX.Y.Z-macos-arm64.tar.gz.sha256
+```
 
 ## 源码安装
 
@@ -147,7 +189,7 @@ export ANTHROPIC_AUTH_TOKEN=your-upstream-key
 
 ## macOS 后台服务
 
-在当前 checkout 下安装并启动 LaunchAgent：
+在源码 checkout 或解压后的 macOS release 目录中安装并启动 LaunchAgent：
 
 ```bash
 chmod +x cx2cc.sh cx2cc-wrapper.sh
@@ -238,14 +280,14 @@ python -m compileall server.py translator.py start-cx2cc.py
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\build-exe.ps1
 ```
 
-构建脚本会生成 `dist\cx2cc-windows-x64.zip` 和 SHA256 文件。
+构建脚本默认生成 `dist\cx2cc-dev-windows-x64.zip` 和 SHA256 文件；可通过 `-Version vX.Y.Z` 指定版本名。
 
 ## 安全说明
 
-- 不要提交或上传 `.env`、日志、API Key 或生成的自启动文件。
+- `.env`、日志、虚拟环境、构建缓存和 Git 元数据不会进入 release 包；不要自行提交或上传这些文件及 API Key。
 - 代理会把 prompts 和工具结果转发给你配置的上游服务商。
-- 默认情况下 cx2cc 只监听 localhost。
-- 日志不会打印完整 API Key；但上游错误体仍可能包含敏感上下文，因此 `logs/` 仍应保持私有。
+- 默认情况下 cx2cc 只监听 `127.0.0.1`。
+- `/health` 只报告上游是否已配置，不返回上游地址；日志和客户端错误也不记录或转发上游 URL、错误正文及完整 API Key。日志仍应保持私有。
 
 ## 许可证
 

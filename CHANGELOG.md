@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.3.0
+
+- Added native macOS arm64 and x86_64 release packages.
+- Unified Windows and macOS builds in a least-privilege release workflow with SHA-pinned actions.
+- Added final-archive smoke tests, architecture checks, strict package file allowlists, and SHA-256 checksums.
+- Added pull request and main-branch CI with tests, compile checks, and full-history secret scanning.
+- Removed upstream URLs and raw upstream error bodies from health responses, logs, and client errors.
+- Updated the Windows build script and macOS LaunchAgent helpers for packaged executables.
+
 ## v0.2.0
 
 - Added a simple Windows GUI launcher (default when `cx2cc.exe` is double-clicked).
