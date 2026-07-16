@@ -192,9 +192,9 @@ def _handle_stream(openai_body: dict, display_model: str, api_key: str = ""):
     for key in keys:
         try:
             upstream = _make_upstream_request(chat_url, openai_body, key, stream=True, timeout=600)
-        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
             _record_key_error(key)
-            log.warning("Stream connect error with an upstream key: %s", e)
+            log.warning("Stream upstream connection failed: %s", type(exc).__name__)
             continue
 
         if upstream.status_code != 200:
@@ -244,9 +244,9 @@ def _handle_nonstream(openai_body: dict, display_model: str, api_key: str = ""):
     for key in keys:
         try:
             upstream = _make_upstream_request(chat_url, openai_body, key, stream=False, timeout=300)
-        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
             _record_key_error(key)
-            log.warning("Nonstream connect error with an upstream key: %s", e)
+            log.warning("Nonstream upstream connection failed: %s", type(exc).__name__)
             continue
 
         if upstream.status_code != 200:
@@ -296,8 +296,7 @@ def handle_models():
 
 @app.route("/health", methods=["GET"])
 def health():
-    upstream = _get_upstream_base_url()
-    return jsonify({"status": "ok", "upstream_configured": bool(upstream), "upstream": upstream})
+    return jsonify({"status": "ok", "upstream_configured": bool(_get_upstream_base_url())})
 
 
 def _err(code: int, msg: str):
@@ -305,20 +304,13 @@ def _err(code: int, msg: str):
 
 
 def _forward_err(upstream):
-    try:
-        body = upstream.json()
-        msg = body.get("error", {}).get("message", "") or upstream.text[:500]
-    except Exception:
-        msg = upstream.text[:500]
-    log.error("Upstream %s: %s", upstream.status_code, msg)
-    return _err(upstream.status_code, f"Upstream: {msg}")
+    log.error("Upstream request failed with status %s", upstream.status_code)
+    return _err(upstream.status_code, f"Upstream request failed with status {upstream.status_code}")
 
 
 def main() -> None:
-    upstream = _get_upstream_base_url()
     log.info("cx2cc starting on %s:%s", LISTEN_HOST, LISTEN_PORT)
-    log.info("App dir: %s", APP_DIR)
-    log.info("Upstream: %s -> %s", upstream or "UNCONFIGURED", UPSTREAM_MODEL)
+    log.info("upstream_configured=%s model=%s", bool(_get_upstream_base_url()), UPSTREAM_MODEL)
     app.run(host=LISTEN_HOST, port=LISTEN_PORT, debug=False, threaded=True)
 
 
