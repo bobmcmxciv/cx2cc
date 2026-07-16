@@ -100,10 +100,14 @@ jobs:
               "start-cx2cc.bat"
           )
           $ExpectedFiles = $ExpectedFiles | Sort-Object
+          $AppDir = (Resolve-Path $AppDir).Path
+          $Binary = Join-Path $AppDir "cx2cc.exe"
           $ActualFiles = Get-ChildItem $AppDir -File -Recurse | ForEach-Object {
               $_.FullName.Substring($AppDir.Length + 1).Replace("\", "/")
           } | Sort-Object
-          if (Compare-Object $ExpectedFiles $ActualFiles) {
+          $PackageDiff = Compare-Object $ExpectedFiles $ActualFiles
+          if ($PackageDiff) {
+              $PackageDiff | Format-Table | Out-String | Write-Error
               throw "Package contents do not match the release whitelist"
           }
           if (-not (Test-Path $Binary)) {
