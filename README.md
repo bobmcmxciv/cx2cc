@@ -23,8 +23,8 @@ OpenAI-compatible upstream
 - Streaming Server-Sent Events translation
 - Text, image, tool use, and tool result translation for common Claude Code flows
 - Optional fallback upstream API keys with finite retry
-- macOS LaunchAgent helper
-- Windows EXE package, foreground, silent, and Startup-folder helper scripts
+- Native macOS arm64 / x86_64 packages and a LaunchAgent helper
+- Windows x64 EXE package, foreground, silent, and Startup-folder helper scripts
 
 ## Compatibility scope
 
@@ -50,13 +50,13 @@ Known limitations:
 
 ## Requirements
 
-- Python 3.10+ when running from source. Windows release zips include `cx2cc.exe` and do not require Python.
+- Python 3.10+ when running from source. Windows and macOS release packages include native executables and do not require Python.
 - An OpenAI Chat Completions compatible upstream endpoint
 - An upstream API key, passed either through `x-api-key` or configured as a fallback environment variable
 
 ## Windows EXE quick start
 
-Download `cx2cc-windows-x64.zip` from the GitHub Release page, unzip it, then copy `.env.example` to `.env` beside `cx2cc.exe`.
+Download the versioned `cx2cc-vX.Y.Z-windows-x64.zip` from the GitHub Release page, unzip it, then copy `.env.example` to `.env` beside `cx2cc.exe`.
 
 ```powershell
 copy .env.example .env
@@ -87,6 +87,48 @@ Invoke-RestMethod http://127.0.0.1:8901/health
 ```
 
 Logs are written to `logs\` beside `cx2cc.exe`. Closing the GUI does not stop a background service started with `start`.
+
+## macOS executable quick start
+
+Download the package for your Mac: `cx2cc-vX.Y.Z-macos-arm64.tar.gz` for Apple silicon or `cx2cc-vX.Y.Z-macos-x86_64.tar.gz` for Intel. Extract it, enter the directory, and create the configuration:
+
+```bash
+tar -xzf cx2cc-vX.Y.Z-macos-arm64.tar.gz
+cd cx2cc-vX.Y.Z-macos-arm64
+cp .env.example .env
+```
+
+After editing `.env`, run the server directly:
+
+```bash
+./cx2cc serve
+curl http://127.0.0.1:8901/health
+```
+
+For a persistent background service, use the bundled LaunchAgent helper:
+
+```bash
+./cx2cc.sh install
+./cx2cc.sh start
+./cx2cc.sh status
+```
+
+The macOS artifact is a native raw Mach-O executable, not an `.app`. There is no universal2 build, and the binary is currently unsigned and unnotarized. If Gatekeeper blocks the first launch, verify the checksum first, then allow the binary under System Settings → Privacy & Security. Do not bypass verification for files from untrusted sources.
+
+## Verify release files
+
+Each archive has a matching `.sha256` file. On Windows PowerShell:
+
+```powershell
+Get-FileHash .\cx2cc-vX.Y.Z-windows-x64.zip -Algorithm SHA256
+Get-Content .\cx2cc-vX.Y.Z-windows-x64.zip.sha256
+```
+
+On macOS:
+
+```bash
+shasum -a 256 -c cx2cc-vX.Y.Z-macos-arm64.tar.gz.sha256
+```
 
 ## Source installation
 
@@ -147,7 +189,7 @@ Keep `CX2CC_HOST=127.0.0.1` unless you intentionally want other machines to reac
 
 ## macOS background service
 
-Install and start a LaunchAgent from the current checkout:
+Install and start a LaunchAgent from a source checkout or an extracted macOS release directory:
 
 ```bash
 chmod +x cx2cc.sh cx2cc-wrapper.sh
@@ -238,14 +280,14 @@ Build the Windows EXE on Windows:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\build-exe.ps1
 ```
 
-The build script creates `dist\cx2cc-windows-x64.zip` and a SHA256 file.
+By default, the build script creates `dist\cx2cc-dev-windows-x64.zip` and a SHA256 file. Pass `-Version vX.Y.Z` to set a release version.
 
 ## Security notes
 
-- Do not commit or upload `.env`, logs, API keys, or generated startup files.
+- Release packages exclude `.env`, logs, virtual environments, build caches, and Git metadata. Do not commit or upload those files or API keys yourself.
 - The proxy forwards prompts and tool results to the configured upstream provider.
-- By default, cx2cc binds to localhost only.
-- Logs intentionally avoid printing full API keys; keep `logs/` private anyway because upstream error bodies may contain sensitive request context.
+- By default, cx2cc binds to `127.0.0.1` only.
+- `/health` reports only whether an upstream is configured. Logs and client errors do not record or forward upstream URLs, error bodies, or full API keys. Keep `logs/` private anyway.
 
 ## License
 

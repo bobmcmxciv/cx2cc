@@ -1,0 +1,484 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  VERSION: ${{ github.event_name == 'workflow_dispatch' && 'dev' || github.ref_name }}
+
+jobs:
+  windows-x64:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Validate version
+        shell: bash
+        run: |
+          [[ "${VERSION}" =~ ^(dev|v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)$ ]]
+
+      - name: Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller==6.16.0
+
+      - name: Run tests
+        run: python -m pytest
+
+      - name: Compile check
+        run: python -m compileall server.py translator.py start-cx2cc.py
+
+      - name: Build executable
+        run: python -m PyInstaller --clean --onefile --name cx2cc --windowed start-cx2cc.py
+
+      - name: Assemble package
+        shell: pwsh
+        run: |
+          $Version = $env:VERSION
+          $PackageName = "cx2cc-$Version-windows-x64"
+          $ReleaseDir = Join-Path "dist" $PackageName
+          $ZipPath = Join-Path "dist" "$PackageName.zip"
+
+          if (Test-Path $ReleaseDir) { Remove-Item $ReleaseDir -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $ReleaseDir | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $ReleaseDir "scripts\windows") | Out-Null
+
+          Copy-Item "dist\cx2cc.exe" $ReleaseDir
+          Copy-Item ".env.example" $ReleaseDir
+          Copy-Item "README.md" $ReleaseDir
+          Copy-Item "README.zh-CN.md" $ReleaseDir
+          Copy-Item "LICENSE" $ReleaseDir
+          Copy-Item "run.bat" $ReleaseDir
+          Copy-Item "start-cx2cc.bat" $ReleaseDir
+          Copy-Item "scripts\windows\start-cx2cc.ps1" (Join-Path $ReleaseDir "scripts\windows")
+          Copy-Item "scripts\windows\run-silent.bat" (Join-Path $ReleaseDir "scripts\windows")
+          Copy-Item "scripts\windows\install-startup.ps1" (Join-Path $ReleaseDir "scripts\windows")
+          Copy-Item "scripts\windows\uninstall-startup.ps1" (Join-Path $ReleaseDir "scripts\windows")
+
+          if (Test-Path $ZipPath) { Remove-Item $ZipPath -Force }
+          Compress-Archive -Path $ReleaseDir -DestinationPath $ZipPath -Force
+
+      - name: Smoke test package
+        shell: pwsh
+        run: |
+          $Version = $env:VERSION
+          $PackageName = "cx2cc-$Version-windows-x64"
+          $ZipPath = Join-Path "dist" "$PackageName.zip"
+          $SmokeRoot = Join-Path "dist" "smoke-windows-x64"
+          $AppDir = Join-Path $SmokeRoot $PackageName
+          $Binary = Join-Path $AppDir "cx2cc.exe"
+          $Process = $null
+
+          if (Test-Path $SmokeRoot) { Remove-Item $SmokeRoot -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $SmokeRoot | Out-Null
+          Expand-Archive -Path $ZipPath -DestinationPath $SmokeRoot -Force
+
+          $ExpectedFiles = @(
+              ".env.example",
+              "LICENSE",
+              "README.md",
+              "README.zh-CN.md",
+              "cx2cc.exe",
+              "run.bat",
+              "scripts/windows/install-startup.ps1",
+              "scripts/windows/run-silent.bat",
+              "scripts/windows/start-cx2cc.ps1",
+              "scripts/windows/uninstall-startup.ps1",
+              "start-cx2cc.bat"
+          )
+          $ExpectedFiles = $ExpectedFiles | Sort-Object
+          $ActualFiles = Get-ChildItem $AppDir -File -Recurse | ForEach-Object {
+              $_.FullName.Substring($AppDir.Length + 1).Replace("\", "/")
+          } | Sort-Object
+          if (Compare-Object $ExpectedFiles $ActualFiles) {
+              throw "Package contents do not match the release whitelist"
+          }
+          if (-not (Test-Path $Binary)) {
+              throw "Missing executable at $Binary"
+          }
+
+          try {
+              $env:CX2CC_PORT = "18901"
+              $env:CX2CC_HOST = "127.0.0.1"
+              Remove-Item Env:CX2CC_UPSTREAM_BASE_URL -ErrorAction SilentlyContinue
+              Remove-Item Env:CX2CC_UPSTREAM_API_KEY -ErrorAction SilentlyContinue
+              Remove-Item Env:CX2CC_UPSTREAM_API_KEYS -ErrorAction SilentlyContinue
+
+              $Process = Start-Process -FilePath $Binary -ArgumentList "serve" -WorkingDirectory $AppDir -PassThru -WindowStyle Hidden
+              $Healthy = $false
+              for ($i = 0; $i -lt 60; $i++) {
+                  if ($Process.HasExited) {
+                      throw "Smoke test process exited early with code $($Process.ExitCode)"
+                  }
+
+                  try {
+                      $Response = Invoke-WebRequest -Uri "http://127.0.0.1:18901/health" -UseBasicParsing -TimeoutSec 2
+                      $Body = $Response.Content | ConvertFrom-Json
+                      $HasUpstreamField = $Body.PSObject.Properties.Name -contains "upstream"
+                      if ($Response.StatusCode -eq 200 -and $Body.status -eq "ok" -and $Body.upstream_configured -eq $false -and -not $HasUpstreamField) {
+                          $Healthy = $true
+                          break
+                      }
+                      throw "Unexpected health response: $($Response.Content)"
+                  } catch {
+                      if ($i -eq 59) {
+                          throw
+                      }
+                      Start-Sleep -Seconds 1
+                  }
+              }
+
+              if (-not $Healthy) {
+                  throw "Timed out waiting for healthy cx2cc"
+              }
+          } finally {
+              if ($null -ne $Process -and -not $Process.HasExited) {
+                  Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
+                  $Process.WaitForExit()
+              }
+          }
+
+      - name: Generate checksum
+        shell: pwsh
+        run: |
+          $Version = $env:VERSION
+          $PackageName = "cx2cc-$Version-windows-x64"
+          $ZipPath = Join-Path "dist" "$PackageName.zip"
+          $Hash = Get-FileHash $ZipPath -Algorithm SHA256
+          "$($Hash.Hash)  $PackageName.zip" | Set-Content -Path "$ZipPath.sha256" -Encoding ASCII
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cx2cc-windows-x64
+          path: |
+            dist/cx2cc-*-windows-x64.zip
+            dist/cx2cc-*-windows-x64.zip.sha256
+
+  macos-arm64:
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Assert architecture
+        run: test "$(uname -m)" = "arm64"
+
+      - name: Validate version
+        shell: bash
+        run: |
+          [[ "${VERSION}" =~ ^(dev|v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)$ ]]
+
+      - name: Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller==6.16.0
+
+      - name: Run tests
+        run: python -m pytest
+
+      - name: Compile check
+        run: python -m compileall server.py translator.py start-cx2cc.py
+
+      - name: Build executable
+        run: python -m PyInstaller --clean --onefile --name cx2cc start-cx2cc.py
+
+      - name: Assemble package
+        run: |
+          set -euo pipefail
+          version="${VERSION}"
+          package="cx2cc-${version}-macos-arm64"
+          release_dir="dist/${package}"
+          archive="dist/${package}.tar.gz"
+
+          rm -rf "${release_dir}" "${archive}"
+          mkdir -p "${release_dir}"
+          cp "dist/cx2cc" "${release_dir}/"
+          cp "cx2cc.sh" "${release_dir}/"
+          cp "cx2cc-wrapper.sh" "${release_dir}/"
+          cp ".env.example" "${release_dir}/"
+          cp "README.md" "${release_dir}/"
+          cp "README.zh-CN.md" "${release_dir}/"
+          cp "LICENSE" "${release_dir}/"
+          chmod +x "${release_dir}/cx2cc" "${release_dir}/cx2cc.sh" "${release_dir}/cx2cc-wrapper.sh"
+          tar -czf "${archive}" -C dist "${package}"
+
+      - name: Smoke test package
+        run: |
+          set -euo pipefail
+          version="${VERSION}"
+          package="cx2cc-${version}-macos-arm64"
+          archive="dist/${package}.tar.gz"
+          smoke_root="dist/smoke-macos-arm64"
+          app_dir="${smoke_root}/${package}"
+          binary="${app_dir}/cx2cc"
+          log_file="${smoke_root}/cx2cc-smoke.log"
+          pid=""
+
+          cleanup() {
+            if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then
+              kill "${pid}" 2>/dev/null || true
+              wait "${pid}" 2>/dev/null || true
+            fi
+          }
+          trap cleanup EXIT
+
+          rm -rf "${smoke_root}"
+          mkdir -p "${smoke_root}"
+          tar -xzf "${archive}" -C "${smoke_root}"
+
+          expected_files="$(printf '%s\n' .env.example LICENSE README.md README.zh-CN.md cx2cc cx2cc-wrapper.sh cx2cc.sh | LC_ALL=C sort)"
+          actual_files="$(find "${app_dir}" -type f -print | sed "s#^${app_dir}/##" | LC_ALL=C sort)"
+          test "${actual_files}" = "${expected_files}"
+          test -x "${binary}"
+          test -x "${app_dir}/cx2cc.sh"
+          test -x "${app_dir}/cx2cc-wrapper.sh"
+          file "${binary}" | grep -E "Mach-O.*arm64"
+
+          unset CX2CC_UPSTREAM_BASE_URL CX2CC_UPSTREAM_API_KEY CX2CC_UPSTREAM_API_KEYS
+          export CX2CC_HOST="127.0.0.1"
+          export CX2CC_PORT="18901"
+
+          "${binary}" serve >"${log_file}" 2>&1 &
+          pid="$!"
+
+          for attempt in $(seq 1 60); do
+            if ! kill -0 "${pid}" 2>/dev/null; then
+              cat "${log_file}" || true
+              echo "Smoke test process exited early"
+              exit 1
+            fi
+
+            body_file="${smoke_root}/health.json"
+            http_code="$(curl -sS -m 2 -o "${body_file}" -w "%{http_code}" "http://127.0.0.1:18901/health" || true)"
+            if [ "${http_code}" = "200" ]; then
+              python3 - "${body_file}" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          body = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          if body.get("status") != "ok":
+              raise SystemExit("status is not ok")
+          if body.get("upstream_configured") is not False:
+              raise SystemExit("upstream_configured is not false")
+          if "upstream" in body:
+              raise SystemExit("health response exposes upstream")
+          PY
+              exit 0
+            fi
+
+            sleep 1
+          done
+
+          cat "${log_file}" || true
+          echo "Timed out waiting for healthy cx2cc"
+          exit 1
+
+      - name: Generate checksum
+        run: |
+          set -euo pipefail
+          version="${VERSION}"
+          package="cx2cc-${version}-macos-arm64"
+          archive="dist/${package}.tar.gz"
+          hash="$(shasum -a 256 "${archive}" | awk '{print $1}')"
+          printf "%s  %s\n" "${hash}" "${package}.tar.gz" > "${archive}.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cx2cc-macos-arm64
+          path: |
+            dist/cx2cc-*-macos-arm64.tar.gz
+            dist/cx2cc-*-macos-arm64.tar.gz.sha256
+
+  macos-x86_64:
+    runs-on: macos-15-intel
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Assert architecture
+        run: test "$(uname -m)" = "x86_64"
+
+      - name: Validate version
+        shell: bash
+        run: |
+          [[ "${VERSION}" =~ ^(dev|v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)$ ]]
+
+      - name: Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller==6.16.0
+
+      - name: Run tests
+        run: python -m pytest
+
+      - name: Compile check
+        run: python -m compileall server.py translator.py start-cx2cc.py
+
+      - name: Build executable
+        run: python -m PyInstaller --clean --onefile --name cx2cc start-cx2cc.py
+
+      - name: Assemble package
+        run: |
+          set -euo pipefail
+          version="${VERSION}"
+          package="cx2cc-${version}-macos-x86_64"
+          release_dir="dist/${package}"
+          archive="dist/${package}.tar.gz"
+
+          rm -rf "${release_dir}" "${archive}"
+          mkdir -p "${release_dir}"
+          cp "dist/cx2cc" "${release_dir}/"
+          cp "cx2cc.sh" "${release_dir}/"
+          cp "cx2cc-wrapper.sh" "${release_dir}/"
+          cp ".env.example" "${release_dir}/"
+          cp "README.md" "${release_dir}/"
+          cp "README.zh-CN.md" "${release_dir}/"
+          cp "LICENSE" "${release_dir}/"
+          chmod +x "${release_dir}/cx2cc" "${release_dir}/cx2cc.sh" "${release_dir}/cx2cc-wrapper.sh"
+          tar -czf "${archive}" -C dist "${package}"
+
+      - name: Smoke test package
+        run: |
+          set -euo pipefail
+          version="${VERSION}"
+          package="cx2cc-${version}-macos-x86_64"
+          archive="dist/${package}.tar.gz"
+          smoke_root="dist/smoke-macos-x86_64"
+          app_dir="${smoke_root}/${package}"
+          binary="${app_dir}/cx2cc"
+          log_file="${smoke_root}/cx2cc-smoke.log"
+          pid=""
+
+          cleanup() {
+            if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then
+              kill "${pid}" 2>/dev/null || true
+              wait "${pid}" 2>/dev/null || true
+            fi
+          }
+          trap cleanup EXIT
+
+          rm -rf "${smoke_root}"
+          mkdir -p "${smoke_root}"
+          tar -xzf "${archive}" -C "${smoke_root}"
+
+          expected_files="$(printf '%s\n' .env.example LICENSE README.md README.zh-CN.md cx2cc cx2cc-wrapper.sh cx2cc.sh | LC_ALL=C sort)"
+          actual_files="$(find "${app_dir}" -type f -print | sed "s#^${app_dir}/##" | LC_ALL=C sort)"
+          test "${actual_files}" = "${expected_files}"
+          test -x "${binary}"
+          test -x "${app_dir}/cx2cc.sh"
+          test -x "${app_dir}/cx2cc-wrapper.sh"
+          file "${binary}" | grep -E "Mach-O.*x86_64"
+
+          unset CX2CC_UPSTREAM_BASE_URL CX2CC_UPSTREAM_API_KEY CX2CC_UPSTREAM_API_KEYS
+          export CX2CC_HOST="127.0.0.1"
+          export CX2CC_PORT="18901"
+
+          "${binary}" serve >"${log_file}" 2>&1 &
+          pid="$!"
+
+          for attempt in $(seq 1 60); do
+            if ! kill -0 "${pid}" 2>/dev/null; then
+              cat "${log_file}" || true
+              echo "Smoke test process exited early"
+              exit 1
+            fi
+
+            body_file="${smoke_root}/health.json"
+            http_code="$(curl -sS -m 2 -o "${body_file}" -w "%{http_code}" "http://127.0.0.1:18901/health" || true)"
+            if [ "${http_code}" = "200" ]; then
+              python3 - "${body_file}" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          body = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          if body.get("status") != "ok":
+              raise SystemExit("status is not ok")
+          if body.get("upstream_configured") is not False:
+              raise SystemExit("upstream_configured is not false")
+          if "upstream" in body:
+              raise SystemExit("health response exposes upstream")
+          PY
+              exit 0
+            fi
+
+            sleep 1
+          done
+
+          cat "${log_file}" || true
+          echo "Timed out waiting for healthy cx2cc"
+          exit 1
+
+      - name: Generate checksum
+        run: |
+          set -euo pipefail
+          version="${VERSION}"
+          package="cx2cc-${version}-macos-x86_64"
+          archive="dist/${package}.tar.gz"
+          hash="$(shasum -a 256 "${archive}" | awk '{print $1}')"
+          printf "%s  %s\n" "${hash}" "${package}.tar.gz" > "${archive}.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cx2cc-macos-x86_64
+          path: |
+            dist/cx2cc-*-macos-x86_64.tar.gz
+            dist/cx2cc-*-macos-x86_64.tar.gz.sha256
+
+  release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    needs:
+      - windows-x64
+      - macos-arm64
+      - macos-x86_64
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create draft release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          draft: true
+          files: |
+            release-assets/cx2cc-${{ env.VERSION }}-windows-x64.zip
+            release-assets/cx2cc-${{ env.VERSION }}-windows-x64.zip.sha256
+            release-assets/cx2cc-${{ env.VERSION }}-macos-arm64.tar.gz
+            release-assets/cx2cc-${{ env.VERSION }}-macos-arm64.tar.gz.sha256
+            release-assets/cx2cc-${{ env.VERSION }}-macos-x86_64.tar.gz
+            release-assets/cx2cc-${{ env.VERSION }}-macos-x86_64.tar.gz.sha256
