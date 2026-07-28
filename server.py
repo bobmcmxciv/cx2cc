@@ -67,6 +67,23 @@ def _fallback_api_keys() -> list[str]:
     return [k.strip() for k in re.split(r"[,\n]+", raw_keys) if k.strip()]
 
 
+def _request_api_key() -> str:
+    """Read the caller's key from either header Claude Code might use.
+
+    `ANTHROPIC_API_KEY` is sent as `x-api-key`, but `ANTHROPIC_AUTH_TOKEN` — which
+    CC Switch and most proxy-style configs use — is sent as `Authorization: Bearer`.
+    Accepting only the former made those configs fail with a confusing 502
+    ("No upstream API key configured") even though the token was correct.
+    """
+    key = request.headers.get("x-api-key", "").strip()
+    if key:
+        return key
+    auth = request.headers.get("Authorization", "").strip()
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return ""
+
+
 def _get_upstream_base_url() -> str | None:
     base_url = os.environ.get("CX2CC_UPSTREAM_BASE_URL", "").strip().rstrip("/")
     return base_url or None
@@ -158,7 +175,7 @@ def handle_messages():
     stream = anthropic_body.get("stream", False)
     model_name = anthropic_body.get("model", UPSTREAM_MODEL)
     msg_count = len(anthropic_body.get("messages", []))
-    api_key = request.headers.get("x-api-key", "").strip()
+    api_key = _request_api_key()
 
     log.info(
         "-> %s | stream=%s | msgs=%s | key_from_header=%s",
