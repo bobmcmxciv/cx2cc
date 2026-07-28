@@ -86,6 +86,11 @@ def translate_request(body: dict) -> dict:
         if a_field in body:
             openai_body[o_field] = body[a_field]
 
+    # OpenAI-compatible upstreams omit the usage chunk while streaming unless it is
+    # explicitly requested, so without this the whole stream carries no token counts.
+    if openai_body.get("stream"):
+        openai_body["stream_options"] = {"include_usage": True}
+
     if body.get("stop_sequences"):
         openai_body["stop"] = body["stop_sequences"]
 
@@ -309,6 +314,8 @@ def stream_translate(
     content_idx = 0
     tool_states = {}  # idx -> {id, name, args_str, anthropic_idx}
     output_tokens = 0
+    input_tokens = 0
+    cache_read_tokens = 0
     active_tool_idx = -1
     finish_reason = None
 
@@ -411,10 +418,15 @@ def stream_translate(
                     "delta": {"type": "input_json_delta", "partial_json": args}
                 })
 
-        # Track output tokens
+        # Track usage. Streaming upstreams send this once, near the end, so every
+        # field has to be captured here or it is lost: the Anthropic side has no
+        # other chance to learn the input size.
         u = chunk.get("usage")
         if u:
             output_tokens = u.get("completion_tokens", output_tokens)
+            input_tokens = u.get("prompt_tokens", input_tokens)
+            details = u.get("prompt_tokens_details") or {}
+            cache_read_tokens = details.get("cached_tokens", cache_read_tokens)
 
     # Close final content block
     if state == "IN_TEXT":
@@ -432,7 +444,16 @@ def stream_translate(
             "stop_reason": _map_finish_reason(finish_reason or "stop"),
             "stop_sequence": None
         },
-        "usage": {"output_tokens": output_tokens}
+        # message_start had to be emitted before the upstream said anything, so it
+        # could only claim input_tokens=0. Report the real figures here instead;
+        # otherwise every streaming request is recorded as having consumed no
+        # input at all, which is what made streamed usage look like zero.
+        "usage": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_read_input_tokens": cache_read_tokens,
+            "cache_creation_input_tokens": 0,
+        }
     })
 
     # message_stop
