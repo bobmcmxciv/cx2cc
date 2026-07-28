@@ -3,9 +3,22 @@ cx2cc 格式翻译核心: Anthropic Messages API <-> OpenAI Chat Completions API
 """
 from __future__ import annotations
 import json
+import os
 import uuid
+from itertools import chain
 
-UPSTREAM_MODEL = "gpt-5.5"
+DEFAULT_UPSTREAM_MODEL = "gpt-5.5"
+# Kept as a module constant for backwards compatibility with existing imports.
+UPSTREAM_MODEL = DEFAULT_UPSTREAM_MODEL
+
+
+def upstream_model() -> str:
+    """Model name to request upstream.
+
+    Read at call time rather than import time so it picks up `.env`, which
+    server.py loads after importing this module.
+    """
+    return os.environ.get("CX2CC_UPSTREAM_MODEL", "").strip() or DEFAULT_UPSTREAM_MODEL
 
 # ============================================================
 # 请求翻译: Anthropic -> OpenAI
@@ -14,7 +27,7 @@ UPSTREAM_MODEL = "gpt-5.5"
 def translate_request(body: dict) -> dict:
     """将 Anthropic Messages API 请求翻译为 OpenAI Chat Completions 格式"""
     openai_body = {
-        "model": UPSTREAM_MODEL,
+        "model": upstream_model(),
         "messages": [],
     }
 
@@ -182,8 +195,18 @@ def _convert_tool_choice(tc):
 # 非流式响应翻译: OpenAI -> Anthropic
 # ============================================================
 
-def translate_response(openai_body: dict, display_model: str = "claude-sonnet-4-6") -> dict:
-    """OpenAI Chat Completion -> Anthropic Message"""
+def translate_response(
+    openai_body: dict,
+    display_model: str = "claude-sonnet-4-6",
+    use_upstream_model: bool = False,
+) -> dict:
+    """OpenAI Chat Completion -> Anthropic Message
+
+    With ``use_upstream_model``, the reported model is the one the upstream says
+    it served, instead of echoing back whatever the client asked for.
+    """
+    if use_upstream_model:
+        display_model = openai_body.get("model") or display_model
     choice = openai_body.get("choices", [{}])[0]
     message = choice.get("message", {})
     finish = choice.get("finish_reason", "stop")
@@ -238,9 +261,34 @@ def _map_finish_reason(fr: str) -> str:
 # 流式 SSE 响应翻译: OpenAI -> Anthropic
 # ============================================================
 
-def stream_translate(response, display_model: str = "claude-sonnet-4-6"):
-    """生成器: 从 OpenAI SSE stream 读取，逐事件生成 Anthropic SSE"""
+def stream_translate(
+    response,
+    display_model: str = "claude-sonnet-4-6",
+    use_upstream_model: bool = False,
+):
+    """生成器: 从 OpenAI SSE stream 读取，逐事件生成 Anthropic SSE
+
+    With ``use_upstream_model``, the first upstream chunk is read before
+    message_start is emitted, so the model reported to the client is the one that
+    actually served the request rather than the one the client asked for.
+    """
     msg_id = f"msg_{uuid.uuid4().hex[:24]}"
+
+    lines = response.iter_lines(decode_unicode=True)
+    buffered: list[str] = []
+    if use_upstream_model:
+        for line in lines:
+            buffered.append(line)
+            if line and line.startswith("data: "):
+                payload = line[6:].strip()
+                if payload and payload != "[DONE]":
+                    try:
+                        served = json.loads(payload).get("model")
+                    except json.JSONDecodeError:
+                        served = None
+                    if served:
+                        display_model = served
+                    break
 
     # Emit message_start
     yield _sse("message_start", {
@@ -264,7 +312,7 @@ def stream_translate(response, display_model: str = "claude-sonnet-4-6"):
     active_tool_idx = -1
     finish_reason = None
 
-    for line in response.iter_lines(decode_unicode=True):
+    for line in chain(buffered, lines):
         if not line:
             continue
         if not line.startswith("data: "):

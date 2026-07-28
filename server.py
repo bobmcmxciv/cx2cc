@@ -14,7 +14,13 @@ import requests
 from dotenv import load_dotenv
 from flask import Flask, Response, jsonify, request
 
-from translator import UPSTREAM_MODEL, stream_translate, translate_request, translate_response
+from translator import (
+    UPSTREAM_MODEL,
+    stream_translate,
+    translate_request,
+    translate_response,
+    upstream_model,
+)
 
 
 def app_dir() -> Path:
@@ -65,6 +71,18 @@ def _fallback_api_keys() -> list[str]:
         os.environ.get("CX2CC_UPSTREAM_API_KEY", ""),
     )
     return [k.strip() for k in re.split(r"[,\n]+", raw_keys) if k.strip()]
+
+
+def _report_upstream_model() -> bool:
+    """Whether responses should name the model that actually served the request.
+
+    Off by default, which preserves the original behaviour of echoing back the
+    model the client asked for. Turning it on stops a client default such as
+    `claude-opus-4-*` from being recorded as the model that ran.
+    """
+    return os.environ.get("CX2CC_REPORT_UPSTREAM_MODEL", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
 
 
 def _request_api_key() -> str:
@@ -228,7 +246,9 @@ def _handle_stream(openai_body: dict, display_model: str, api_key: str = ""):
 
         def generate():
             try:
-                for chunk in stream_translate(upstream, display_model):
+                for chunk in stream_translate(
+                    upstream, display_model, use_upstream_model=_report_upstream_model()
+                ):
                     yield chunk
             except Exception:
                 log.exception("Stream translation error")
@@ -277,7 +297,9 @@ def _handle_nonstream(openai_body: dict, display_model: str, api_key: str = ""):
 
         _record_key_ok(key)
         try:
-            anthropic_resp = translate_response(upstream.json(), display_model)
+            anthropic_resp = translate_response(
+                upstream.json(), display_model, use_upstream_model=_report_upstream_model()
+            )
         except Exception:
             log.exception("Response translation failed")
             return _err(500, "Response translation error")
@@ -301,7 +323,7 @@ def handle_models():
         {
             "data": [
                 {
-                    "id": UPSTREAM_MODEL,
+                    "id": upstream_model(),
                     "object": "model",
                     "created": 1,
                     "owned_by": "upstream",
@@ -327,7 +349,7 @@ def _forward_err(upstream):
 
 def main() -> None:
     log.info("cx2cc starting on %s:%s", LISTEN_HOST, LISTEN_PORT)
-    log.info("upstream_configured=%s model=%s", bool(_get_upstream_base_url()), UPSTREAM_MODEL)
+    log.info("upstream_configured=%s model=%s", bool(_get_upstream_base_url()), upstream_model())
     app.run(host=LISTEN_HOST, port=LISTEN_PORT, debug=False, threaded=True)
 
 
