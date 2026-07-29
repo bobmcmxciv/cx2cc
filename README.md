@@ -69,7 +69,7 @@ Set `CX2CC_PROMPT_CACHE_KEY=off` if your upstream rejects unknown request fields
 
 - Python 3.10+ when running from source. Windows and macOS release packages include native executables and do not require Python.
 - An OpenAI Chat Completions compatible upstream endpoint
-- An upstream API key, passed either through `x-api-key` or configured as a fallback environment variable
+- An upstream API key, passed through `x-api-key` or `Authorization: Bearer`, or configured as a fallback environment variable
 
 ## Windows EXE quick start
 

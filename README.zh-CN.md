@@ -69,7 +69,7 @@ cx2cc 自身不缓存任何内容，但会让上游的自动 prompt 缓存持续
 
 - 源码运行需要 Python 3.10+。Windows 和 macOS release 包均内含原生可执行文件，普通用户不需要安装 Python。
 - 一个 OpenAI Chat Completions 兼容的上游接口
-- 一个上游 API Key，可通过请求头 `x-api-key` 传入，也可配置为环境变量 fallback key
+- 一个上游 API Key，可通过请求头 `x-api-key` 或 `Authorization: Bearer` 传入，也可配置为环境变量 fallback key
 
 ## Windows EXE 快速开始
 
