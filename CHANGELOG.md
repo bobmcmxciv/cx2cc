@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added `GET /usage` (alias `/v1/usage`): forwards the upstream's usage/quota JSON with the same key passthrough as `/v1/messages`, so CC Switch can display remaining subscription quota. The upstream URL defaults to the base URL without its `/v1` suffix plus `/usage` and can be overridden with `CX2CC_USAGE_URL`.
+- Made server tests hermetic: a real `.env` next to `server.py` no longer leaks into tests and makes them hit a live upstream.
+
 - Added a per-conversation `prompt_cache_key` (uuid5 of the system prompt and first user message) sent with every upstream request, so OpenAI-style automatic prompt caching keeps hitting across the turns of one conversation. Disable with `CX2CC_PROMPT_CACHE_KEY=off`. Observed per-turn hit rates on real agentic sessions went from ~13% to ~99%.
 - Reported real input token counts and upstream cached tokens (`cache_read_input_tokens`) for streamed responses; previously streamed usage was reported as zero.
 - Added `CX2CC_UPSTREAM_MODEL` to configure the upstream model name and `CX2CC_REPORT_UPSTREAM_MODEL` to report the model that actually served each request.

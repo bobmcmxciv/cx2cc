@@ -114,6 +114,24 @@ def _chat_url() -> str | None:
     return f"{base_url}/chat/completions"
 
 
+def _usage_url() -> str | None:
+    """Upstream endpoint behind GET /usage.
+
+    Defaults to `<base URL without its /v1 suffix>/usage`, which matches
+    codex-bridge; `CX2CC_USAGE_URL` overrides it for upstreams that expose
+    usage elsewhere. Upstreams without such an endpoint answer 404, which is
+    forwarded as-is.
+    """
+    explicit = os.environ.get("CX2CC_USAGE_URL", "").strip()
+    if explicit:
+        return explicit
+    base_url = _get_upstream_base_url()
+    if not base_url:
+        return None
+    root = base_url[: -len("/v1")] if base_url.endswith("/v1") else base_url
+    return f"{root}/usage"
+
+
 def _get_fallback_key(keys: list[str]) -> str | None:
     global _key_index
     if not keys:
@@ -311,6 +329,57 @@ def _handle_nonstream(openai_body: dict, display_model: str, api_key: str = ""):
             anthropic_resp["usage"]["output_tokens"],
         )
         return jsonify(anthropic_resp)
+
+    if last_upstream is not None:
+        return _forward_err(last_upstream)
+    return _err(502, "Upstream request failed for all configured keys")
+
+
+@app.route("/v1/usage", methods=["GET"])
+@app.route("/usage", methods=["GET"])
+def handle_usage():
+    """Forward the upstream's usage/quota JSON so CC Switch can display it.
+
+    Same key discipline as /v1/messages: the caller's key is passed through as
+    the upstream bearer token, so an invalid caller key comes back as the
+    upstream's 401 rather than leaking anything. The body is returned verbatim
+    on success only; upstream error bodies stay hidden as elsewhere.
+    """
+    usage_url = _usage_url()
+    if not usage_url:
+        return _err(502, "No upstream base URL configured (set CX2CC_UPSTREAM_BASE_URL)")
+
+    keys = _candidate_keys(_request_api_key())
+    if not keys:
+        return _err(502, "No upstream API key configured (set x-api-key header or CX2CC_UPSTREAM_API_KEY env)")
+
+    last_upstream = None
+    for key in keys:
+        try:
+            upstream = requests.get(
+                usage_url,
+                headers={"Authorization": f"Bearer {key}"},
+                timeout=30,
+            )
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+            _record_key_error(key)
+            log.warning("Usage upstream connection failed: %s", type(exc).__name__)
+            continue
+
+        if upstream.status_code != 200:
+            last_upstream = upstream
+            if _should_retry_key(upstream.status_code, upstream.text[:500]):
+                _record_key_error(key)
+                log.warning("Upstream key retry eligible (%s)", upstream.status_code)
+                continue
+            return _forward_err(upstream)
+
+        _record_key_ok(key)
+        try:
+            return jsonify(upstream.json())
+        except Exception:
+            log.exception("Usage response was not valid JSON")
+            return _err(502, "Upstream usage response was not valid JSON")
 
     if last_upstream is not None:
         return _forward_err(last_upstream)

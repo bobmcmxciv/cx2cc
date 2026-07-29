@@ -20,6 +20,7 @@ OpenAI-compatible upstream
 
 - `POST /v1/messages` compatibility shim
 - `GET /v1/models` compatibility shim
+- `GET /usage` passthrough of the upstream's quota/rate-limit JSON, for usage display in CC Switch
 - Streaming Server-Sent Events translation
 - Text, image, tool use, and tool result translation for common Claude Code flows
 - Per-conversation `prompt_cache_key` so upstream automatic prompt caching keeps hitting across turns, with cache reads reported back to the client
@@ -44,7 +45,7 @@ The supported target is the practical subset used by Claude Code / CC Switch aga
 
 Known limitations:
 
-- Only `/v1/messages`, `/v1/models`, and `/health` are exposed.
+- Only `/v1/messages`, `/v1/models`, `/usage`, and `/health` are exposed.
 - Batches, Files, token counting, server-side Anthropic tools, structured outputs, and native thinking blocks are not fully implemented.
 - Prompt caching relies on the upstream's automatic caching (see [Prompt caching](#prompt-caching)); Anthropic `cache_control` markers are ignored.
 - Streaming token usage depends on the upstream sending a usage chunk (`stream_options.include_usage` is requested automatically); if the upstream sends none, input tokens are reported as `0`.
@@ -64,6 +65,16 @@ Two accounting caveats, inherited from OpenAI usage semantics:
 - `cache_creation_input_tokens` is always `0`; OpenAI-style upstreams have no cache-write charge.
 
 Set `CX2CC_PROMPT_CACHE_KEY=off` if your upstream rejects unknown request fields.
+
+## Usage endpoint
+
+`GET /usage` (alias `GET /v1/usage`) forwards the upstream's usage/quota JSON, so a tool like CC Switch can show remaining quota through cx2cc instead of reaching the upstream directly.
+
+- Key handling matches `/v1/messages`: the caller's `x-api-key` / `Authorization: Bearer` is passed through as the upstream bearer token, and an invalid key comes back as the upstream's `401`.
+- The upstream URL defaults to the configured base URL with a trailing `/v1` stripped, plus `/usage` (`https://example.com/v1` → `https://example.com/usage`). Set `CX2CC_USAGE_URL` to point somewhere else.
+- cx2cc does not interpret the payload. Whatever JSON the upstream answers with HTTP 200 is returned verbatim; the payload shape is therefore upstream-defined. Upstreams without a usage endpoint answer 404, forwarded as a status code only.
+
+In CC Switch, enable usage query on the provider card with a custom script that requests `{{baseUrl}}/usage` with header `x-api-key: {{apiKey}}` and extracts whatever fields your upstream serves.
 
 ## Requirements
 
@@ -284,6 +295,7 @@ The Windows scripts use their own location to find the release/source directory.
 | `CX2CC_UPSTREAM_MODEL` | No | `gpt-5.5` | Model name requested from the upstream for every request. |
 | `CX2CC_REPORT_UPSTREAM_MODEL` | No | off | When `1`/`true`/`yes`/`on`, responses name the model the upstream says it served instead of echoing the client's requested model. |
 | `CX2CC_PROMPT_CACHE_KEY` | No | on | Set `off` to stop sending the per-conversation `prompt_cache_key` upstream. |
+| `CX2CC_USAGE_URL` | No | derived | Upstream URL behind `GET /usage`. Defaults to the base URL without its `/v1` suffix plus `/usage`. |
 | `CX2CC_HOST` | No | `127.0.0.1` | Local listen host. |
 | `CX2CC_PORT` | No | `8901` | Local listen port. |
 
