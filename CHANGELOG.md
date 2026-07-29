@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Added a per-conversation `prompt_cache_key` (uuid5 of the system prompt and first user message) sent with every upstream request, so OpenAI-style automatic prompt caching keeps hitting across the turns of one conversation. Disable with `CX2CC_PROMPT_CACHE_KEY=off`. Observed per-turn hit rates on real agentic sessions went from ~13% to ~99%.
+- Reported real input token counts and upstream cached tokens (`cache_read_input_tokens`) for streamed responses; previously streamed usage was reported as zero.
+- Added `CX2CC_UPSTREAM_MODEL` to configure the upstream model name and `CX2CC_REPORT_UPSTREAM_MODEL` to report the model that actually served each request.
+- Accepted `Authorization: Bearer` in addition to `x-api-key` as the caller's upstream key source.
+- Documented the prompt caching mechanism and its OpenAI-style usage semantics (reported `input_tokens` includes cached tokens).
+
 ## v0.3.0
 
 - Added native macOS arm64 and x86_64 release packages.

@@ -22,6 +22,7 @@ OpenAI-compatible upstream
 - `GET /v1/models` compatibility shim
 - Streaming Server-Sent Events translation
 - Text, image, tool use, and tool result translation for common Claude Code flows
+- Per-conversation `prompt_cache_key` so upstream automatic prompt caching keeps hitting across turns, with cache reads reported back to the client
 - Optional fallback upstream API keys with finite retry
 - Native macOS arm64 / x86_64 packages and a LaunchAgent helper
 - Windows x64 EXE package, foreground, silent, and Startup-folder helper scripts
@@ -44,9 +45,25 @@ The supported target is the practical subset used by Claude Code / CC Switch aga
 Known limitations:
 
 - Only `/v1/messages`, `/v1/models`, and `/health` are exposed.
-- Batches, Files, token counting, prompt caching, server-side Anthropic tools, structured outputs, and native thinking blocks are not fully implemented.
-- Streaming token usage depends on upstream chunks; input tokens may be reported as `0` in streaming mode.
+- Batches, Files, token counting, server-side Anthropic tools, structured outputs, and native thinking blocks are not fully implemented.
+- Prompt caching relies on the upstream's automatic caching (see [Prompt caching](#prompt-caching)); Anthropic `cache_control` markers are ignored.
+- Streaming token usage depends on the upstream sending a usage chunk (`stream_options.include_usage` is requested automatically); if the upstream sends none, input tokens are reported as `0`.
 - Actual model behavior and tool-call fidelity depend on the upstream OpenAI-compatible provider.
+
+## Prompt caching
+
+cx2cc does not cache anything itself, but it keeps the upstream provider's automatic prompt caching effective and visible:
+
+- Every request carries a stable `prompt_cache_key`, a uuid5 hash of the conversation's system prompt and first user message — constant across the turns of one conversation, distinct between conversations, and revealing no prompt content. OpenAI-style backends use this key for cache-affine routing; without it, consecutive turns of one conversation can be load-balanced onto different cache nodes and miss a cache that exists. On real agentic sessions this was the difference between ~13% and ~99% observed per-turn hit rates.
+- Upstream `usage.prompt_tokens_details.cached_tokens` is reported back to the client as `cache_read_input_tokens` in the streamed `message_delta`.
+- Anthropic `cache_control` markers are accepted and ignored; upstream caching is automatic and needs no annotations.
+
+Two accounting caveats, inherited from OpenAI usage semantics:
+
+- The reported `input_tokens` already **includes** the cached portion; `cache_read_input_tokens` is a subset of it, not an addition. Tools that sum Anthropic-style (`input + cache_read`) will double-count cache hits.
+- `cache_creation_input_tokens` is always `0`; OpenAI-style upstreams have no cache-write charge.
+
+Set `CX2CC_PROMPT_CACHE_KEY=off` if your upstream rejects unknown request fields.
 
 ## Requirements
 
@@ -264,6 +281,9 @@ The Windows scripts use their own location to find the release/source directory.
 | `CX2CC_UPSTREAM_BASE_URL` | Yes | none | OpenAI-compatible API base URL, e.g. `https://example.com/v1`. |
 | `CX2CC_UPSTREAM_API_KEY` | No | none | Fallback upstream key used when request `x-api-key` is absent. |
 | `CX2CC_UPSTREAM_API_KEYS` | No | none | Comma/newline separated fallback keys. Takes precedence over `CX2CC_UPSTREAM_API_KEY`. |
+| `CX2CC_UPSTREAM_MODEL` | No | `gpt-5.5` | Model name requested from the upstream for every request. |
+| `CX2CC_REPORT_UPSTREAM_MODEL` | No | off | When `1`/`true`/`yes`/`on`, responses name the model the upstream says it served instead of echoing the client's requested model. |
+| `CX2CC_PROMPT_CACHE_KEY` | No | on | Set `off` to stop sending the per-conversation `prompt_cache_key` upstream. |
 | `CX2CC_HOST` | No | `127.0.0.1` | Local listen host. |
 | `CX2CC_PORT` | No | `8901` | Local listen port. |
 

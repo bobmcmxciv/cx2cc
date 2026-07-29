@@ -97,6 +97,57 @@ def test_translate_request_image_block():
     assert content[1] == {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}}
 
 
+def test_prompt_cache_key_stable_across_turns():
+    turn1 = {
+        "system": "You are helpful.",
+        "messages": [{"role": "user", "content": "Start task"}],
+    }
+    turn2 = {
+        "system": "You are helpful.",
+        "messages": [
+            {"role": "user", "content": "Start task"},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Working"},
+                    {"type": "tool_use", "id": "t1", "name": "search", "input": {}},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}],
+            },
+        ],
+    }
+
+    key1 = translate_request(turn1)["prompt_cache_key"]
+    key2 = translate_request(turn2)["prompt_cache_key"]
+
+    assert key1 == key2
+
+
+def test_prompt_cache_key_differs_between_conversations():
+    conv_a = {"system": "You are helpful.", "messages": [{"role": "user", "content": "Task A"}]}
+    conv_b = {"system": "You are helpful.", "messages": [{"role": "user", "content": "Task B"}]}
+    conv_c = {"system": "Other system.", "messages": [{"role": "user", "content": "Task A"}]}
+
+    keys = {
+        translate_request(conv_a)["prompt_cache_key"],
+        translate_request(conv_b)["prompt_cache_key"],
+        translate_request(conv_c)["prompt_cache_key"],
+    }
+
+    assert len(keys) == 3
+
+
+def test_prompt_cache_key_disabled(monkeypatch):
+    monkeypatch.setenv("CX2CC_PROMPT_CACHE_KEY", "off")
+
+    result = translate_request({"messages": [{"role": "user", "content": "hi"}]})
+
+    assert "prompt_cache_key" not in result
+
+
 def test_translate_response_text_tool_and_usage():
     openai_body = {
         "choices": [

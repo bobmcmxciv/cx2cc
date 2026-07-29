@@ -22,6 +22,7 @@ OpenAI-compatible upstream
 - 兼容 `GET /v1/models`
 - 支持流式 SSE 事件转换
 - 支持 Claude Code 常见流程里的文本、图片、工具调用和工具结果转换
+- 按会话生成稳定的 `prompt_cache_key`，让上游自动 prompt 缓存跨轮持续命中，并把缓存读取量回报给客户端
 - 支持可选的上游备用 API Key，并带有限重试
 - 提供 macOS arm64 / x86_64 原生可执行包和 LaunchAgent 管理脚本
 - 提供 Windows x64 EXE 包、前台启动、静默启动和开机自启动脚本
@@ -44,9 +45,25 @@ cx2cc 不是 Anthropic 官方 API，也不实现 Anthropic API 的全部功能�
 已知限制：
 
 - 只暴露 `/v1/messages`、`/v1/models` 和 `/health`。
-- Batches、Files、token counting、prompt caching、Anthropic server-side tools、structured outputs、原生 thinking blocks 等能力尚未完整实现。
-- 流式 token usage 取决于上游返回的 chunk；流式模式下 input tokens 可能显示为 `0`。
+- Batches、Files、token counting、Anthropic server-side tools、structured outputs、原生 thinking blocks 等能力尚未完整实现。
+- Prompt 缓存依赖上游的自动缓存（见 [Prompt 缓存](#prompt-缓存)）；请求中的 Anthropic `cache_control` 标记会被忽略。
+- 流式 token usage 取决于上游是否返回 usage chunk（代理会自动请求 `stream_options.include_usage`）；上游不返回时 input tokens 记为 `0`。
 - 实际模型表现和工具调用可靠性取决于你配置的 OpenAI 兼容上游。
+
+## Prompt 缓存
+
+cx2cc 自身不缓存任何内容，但会让上游的自动 prompt 缓存持续生效并对客户端可见：
+
+- 每个请求都携带稳定的 `prompt_cache_key`：对会话的 system prompt 和第一条 user 消息做 uuid5 哈希——同一会话各轮恒定、不同会话彼此不同，且不泄露 prompt 内容。OpenAI 风格后端用这个 key 做缓存亲和路由；没有它，同一会话的连续请求可能被负载均衡到不同缓存节点，导致明明存在的缓存无法命中。在真实 agentic 会话上，这就是逐轮命中率 ~13% 与 ~99% 的差别。
+- 上游 `usage.prompt_tokens_details.cached_tokens` 会作为 `cache_read_input_tokens` 通过流式 `message_delta` 回报给客户端。
+- 请求中的 Anthropic `cache_control` 标记会被接受但忽略；上游缓存是自动的，无需标注。
+
+两个计量口径注意点（继承自 OpenAI usage 语义）：
+
+- 回报的 `input_tokens` **已包含**缓存命中部分；`cache_read_input_tokens` 是它的子集而非额外量。按 Anthropic 语义求和（`input + cache_read`）的统计工具会把缓存命中重复计一次。
+- `cache_creation_input_tokens` 恒为 `0`；OpenAI 风格上游没有"写缓存"计费。
+
+如果你的上游会拒绝未知请求字段，设置 `CX2CC_PROMPT_CACHE_KEY=off` 关闭该功能。
 
 ## 环境要求
 
@@ -264,6 +281,9 @@ Windows 脚本会根据脚本自身位置定位 release/源码目录。release �
 | `CX2CC_UPSTREAM_BASE_URL` | 是 | 无 | OpenAI 兼容 API base URL，例如 `https://example.com/v1`。 |
 | `CX2CC_UPSTREAM_API_KEY` | 否 | 无 | 请求未提供 `x-api-key` 时使用的备用上游 key。 |
 | `CX2CC_UPSTREAM_API_KEYS` | 否 | 无 | 逗号或换行分隔的多个备用 key；优先于 `CX2CC_UPSTREAM_API_KEY`。 |
+| `CX2CC_UPSTREAM_MODEL` | 否 | `gpt-5.5` | 每个请求向上游申请的模型名。 |
+| `CX2CC_REPORT_UPSTREAM_MODEL` | 否 | 关 | 设为 `1`/`true`/`yes`/`on` 时，响应中报告上游实际服务的模型，而不是回显客户端请求的模型名。 |
+| `CX2CC_PROMPT_CACHE_KEY` | 否 | 开 | 设为 `off` 时不再向上游发送会话级 `prompt_cache_key`。 |
 | `CX2CC_HOST` | 否 | `127.0.0.1` | 本地监听地址。 |
 | `CX2CC_PORT` | 否 | `8901` | 本地监听端口。 |
 

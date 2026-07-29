@@ -20,6 +20,40 @@ def upstream_model() -> str:
     """
     return os.environ.get("CX2CC_UPSTREAM_MODEL", "").strip() or DEFAULT_UPSTREAM_MODEL
 
+
+def prompt_cache_key_enabled() -> bool:
+    """Whether to attach a per-conversation `prompt_cache_key` upstream.
+
+    On by default; set CX2CC_PROMPT_CACHE_KEY=off for upstreams that reject
+    unknown request fields.
+    """
+    return os.environ.get("CX2CC_PROMPT_CACHE_KEY", "").strip().lower() not in (
+        "0", "off", "false", "no",
+    )
+
+
+def _prompt_cache_key(body: dict) -> str:
+    """Stable per-conversation cache key for the upstream.
+
+    OpenAI-compatible backends route prompt-cache lookups by `prompt_cache_key`:
+    without one, consecutive turns of the same conversation can land on
+    different cache nodes and miss a cache that provably exists (observed hit
+    rates around 13% on agentic sessions, versus 99% once keyed). Every turn of
+    one conversation repeats the same system prompt and first user message, so
+    hashing those yields a constant key per conversation while distinct
+    conversations still spread across nodes.
+    """
+    first_user = None
+    for msg in body.get("messages", []):
+        if msg.get("role") == "user":
+            first_user = msg.get("content")
+            break
+    seed = json.dumps(
+        [body.get("system", ""), first_user],
+        ensure_ascii=False, sort_keys=True, default=str,
+    )
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
+
 # ============================================================
 # 请求翻译: Anthropic -> OpenAI
 # ============================================================
@@ -96,6 +130,9 @@ def translate_request(body: dict) -> dict:
 
     if body.get("top_k") is not None:
         pass  # OpenAI doesn't support top_k
+
+    if prompt_cache_key_enabled():
+        openai_body["prompt_cache_key"] = _prompt_cache_key(body)
 
     return openai_body
 
