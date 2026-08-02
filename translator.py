@@ -2,10 +2,14 @@
 cx2cc 格式翻译核心: Anthropic Messages API <-> OpenAI Chat Completions API
 """
 from __future__ import annotations
+import hashlib
 import json
+import logging
 import os
 import uuid
 from itertools import chain
+
+log = logging.getLogger("cx2cc.translator")
 
 DEFAULT_UPSTREAM_MODEL = "gpt-5.5"
 # Kept as a module constant for backwards compatibility with existing imports.
@@ -54,6 +58,32 @@ def _prompt_cache_key(body: dict) -> str:
     )
     return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
 
+
+def request_diag(openai_body: dict) -> str:
+    """One-line fingerprint of the translated request, for cache diagnostics.
+
+    A cumulative hash over the serialized request is snapshotted at fixed
+    message indexes. Consecutive turns of one conversation resend the previous
+    prompt as a prefix, so at every index both turns cover, the snapshots must
+    be identical. When upstream `cached_tokens` collapses between turns, the
+    first index whose snapshot changed brackets where the prompt diverged —
+    and if none changed, the content was intact and the upstream simply
+    dropped a cache it could have used. That distinction cannot be recovered
+    after the fact, which is why it is logged per request.
+    """
+    tools = openai_body.get("tools", [])
+    msgs = openai_body.get("messages", [])
+    h = hashlib.sha1()
+    h.update(json.dumps(tools, ensure_ascii=False).encode("utf-8"))
+    marks = [f"t:{h.hexdigest()[:8]}"]
+    for i, m in enumerate(msgs, 1):
+        h.update(json.dumps(m, ensure_ascii=False).encode("utf-8"))
+        if i in (1, 2, 8, 32, 128, 512):
+            marks.append(f"{i}:{h.hexdigest()[:8]}")
+    marks.append(f"{len(msgs)}:{h.hexdigest()[:8]}")
+    key = openai_body.get("prompt_cache_key", "-")
+    return f"key={key[:8]} tools={len(tools)} h[{' '.join(marks)}]"
+
 # ============================================================
 # 请求翻译: Anthropic -> OpenAI
 # ============================================================
@@ -79,14 +109,14 @@ def translate_request(body: dict) -> dict:
             openai_body["messages"].append({"role": "system", "content": system_text})
 
     # Messages: content blocks -> OpenAI messages
-    for msg in body.get("messages", []):
+    for msg_idx, msg in enumerate(body.get("messages", [])):
         role = msg["role"]
         content = msg.get("content", "")
 
         if isinstance(content, str):
             openai_body["messages"].append({"role": role, "content": content})
         elif isinstance(content, list):
-            converted = _convert_content_blocks(role, content)
+            converted = _convert_content_blocks(role, content, msg_idx)
             openai_body["messages"].extend(converted)
 
     # Tools
@@ -137,14 +167,14 @@ def translate_request(body: dict) -> dict:
     return openai_body
 
 
-def _convert_content_blocks(role: str, blocks: list) -> list:
+def _convert_content_blocks(role: str, blocks: list, msg_idx: int = 0) -> list:
     """将 Anthropic content_blocks 数组转换为 OpenAI message(s)"""
     text_parts = []
     openai_content = []
     tool_calls = []
     tool_msgs = []
 
-    for block in blocks:
+    for block_idx, block in enumerate(blocks):
         if not isinstance(block, dict):
             continue
         t = block.get("type")
@@ -154,8 +184,12 @@ def _convert_content_blocks(role: str, blocks: list) -> list:
             text_parts.append(text)
             openai_content.append({"type": "text", "text": text})
         elif t == "tool_use" and role == "assistant":
+            # The fallback id must be a pure function of the block's position:
+            # a random one would serialize differently on every retransmission
+            # of the same history, breaking the upstream prompt cache at this
+            # offset for the rest of the conversation.
             tool_calls.append({
-                "id": block.get("id", f"call_{uuid.uuid4().hex[:12]}"),
+                "id": block.get("id") or f"call_m{msg_idx}b{block_idx}",
                 "type": "function",
                 "function": {
                     "name": block.get("name", ""),
@@ -307,6 +341,7 @@ def stream_translate(
     response,
     display_model: str = "claude-sonnet-4-6",
     use_upstream_model: bool = False,
+    diag: str = "",
 ):
     """生成器: 从 OpenAI SSE stream 读取，逐事件生成 Anthropic SSE
 
@@ -473,6 +508,14 @@ def stream_translate(
         yield _sse("content_block_stop", {
             "type": "content_block_stop", "index": st["anthropic_idx"]
         })
+
+    # The usage frame arrives once, at stream end, so this is the only place
+    # streamed cache statistics can be recorded.
+    if diag:
+        log.info(
+            "<- stream in=%s cached=%s out=%s | %s",
+            input_tokens, cache_read_tokens, output_tokens, diag,
+        )
 
     # message_delta
     yield _sse("message_delta", {

@@ -1,6 +1,6 @@
 import json
 
-from translator import translate_request, translate_response, stream_translate
+from translator import request_diag, translate_request, translate_response, stream_translate
 
 
 class FakeStreamResponse:
@@ -146,6 +146,75 @@ def test_prompt_cache_key_disabled(monkeypatch):
     result = translate_request({"messages": [{"role": "user", "content": "hi"}]})
 
     assert "prompt_cache_key" not in result
+
+
+def test_missing_tool_use_id_fallback_is_deterministic():
+    body = {
+        "messages": [
+            {"role": "user", "content": "go"},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "name": "search", "input": {"q": "a"}},
+                    {"type": "tool_use", "name": "search", "input": {"q": "a"}},
+                ],
+            },
+        ],
+    }
+
+    first = translate_request(body)
+    second = translate_request(body)
+
+    # Retransmitting identical history must serialize identically, or the
+    # upstream prompt cache breaks at this offset on every later turn.
+    assert json.dumps(first, sort_keys=True) == json.dumps(second, sort_keys=True)
+    ids = [tc["id"] for tc in first["messages"][1]["tool_calls"]]
+    assert len(set(ids)) == 2
+
+
+def _diag_marks(diag):
+    marks = diag.split("h[", 1)[1].rstrip("]").split()
+    return dict(m.split(":") for m in marks)
+
+
+def test_request_diag_snapshots_match_on_shared_prefix():
+    turn1 = {
+        "system": "You are helpful.",
+        "messages": [{"role": "user", "content": "Start task"}],
+    }
+    turn2 = {
+        "system": "You are helpful.",
+        "messages": [
+            {"role": "user", "content": "Start task"},
+            {"role": "assistant", "content": "Done"},
+        ],
+    }
+
+    diag1 = request_diag(translate_request(turn1))
+    diag2 = request_diag(translate_request(turn2))
+
+    marks1, marks2 = _diag_marks(diag1), _diag_marks(diag2)
+    # Indexes covered by both turns hash identically; the longer turn's extra
+    # content shows up only at indexes beyond the shared prefix.
+    assert marks1["t"] == marks2["t"]
+    assert marks1["1"] == marks2["1"]
+    assert marks1["2"] != marks2["1"]
+
+
+def test_request_diag_detects_prefix_divergence():
+    base = {
+        "system": "You are helpful.",
+        "messages": [{"role": "user", "content": "Start task"}],
+    }
+    changed = {
+        "system": "You are helpful!",
+        "messages": [{"role": "user", "content": "Start task"}],
+    }
+
+    marks_a = _diag_marks(request_diag(translate_request(base)))
+    marks_b = _diag_marks(request_diag(translate_request(changed)))
+
+    assert marks_a["1"] != marks_b["1"]
 
 
 def test_translate_response_text_tool_and_usage():

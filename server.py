@@ -16,6 +16,7 @@ from flask import Flask, Response, jsonify, request
 
 from translator import (
     UPSTREAM_MODEL,
+    request_diag,
     stream_translate,
     translate_request,
     translate_response,
@@ -233,12 +234,17 @@ def handle_messages():
         log.exception("Request translation failed")
         return _err(400, "Translation error")
 
+    # Fingerprint every request so cache-miss forensics don't depend on data
+    # that only exists while the request is in flight (see request_diag).
+    diag = f"msgs={msg_count} {request_diag(openai_body)}"
+    log.info("-> diag %s", diag)
+
     if stream:
-        return _handle_stream(openai_body, model_name, api_key=api_key)
-    return _handle_nonstream(openai_body, model_name, api_key=api_key)
+        return _handle_stream(openai_body, model_name, api_key=api_key, diag=diag)
+    return _handle_nonstream(openai_body, model_name, api_key=api_key, diag=diag)
 
 
-def _handle_stream(openai_body: dict, display_model: str, api_key: str = ""):
+def _handle_stream(openai_body: dict, display_model: str, api_key: str = "", diag: str = ""):
     chat_url = _chat_url()
     if not chat_url:
         return _err(502, "No upstream base URL configured (set CX2CC_UPSTREAM_BASE_URL)")
@@ -271,7 +277,10 @@ def _handle_stream(openai_body: dict, display_model: str, api_key: str = ""):
         def generate():
             try:
                 for chunk in stream_translate(
-                    upstream, display_model, use_upstream_model=_report_upstream_model()
+                    upstream,
+                    display_model,
+                    use_upstream_model=_report_upstream_model(),
+                    diag=diag,
                 ):
                     yield chunk
             except Exception:
@@ -292,7 +301,7 @@ def _handle_stream(openai_body: dict, display_model: str, api_key: str = ""):
     return _err(502, "Upstream request failed for all configured keys")
 
 
-def _handle_nonstream(openai_body: dict, display_model: str, api_key: str = ""):
+def _handle_nonstream(openai_body: dict, display_model: str, api_key: str = "", diag: str = ""):
     chat_url = _chat_url()
     if not chat_url:
         return _err(502, "No upstream base URL configured (set CX2CC_UPSTREAM_BASE_URL)")
@@ -329,10 +338,12 @@ def _handle_nonstream(openai_body: dict, display_model: str, api_key: str = ""):
             return _err(500, "Response translation error")
 
         log.info(
-            "<- %s | in=%s out=%s",
+            "<- %s | in=%s cached=%s out=%s | %s",
             anthropic_resp["stop_reason"],
             anthropic_resp["usage"]["input_tokens"],
+            anthropic_resp["usage"].get("cache_read_input_tokens", 0),
             anthropic_resp["usage"]["output_tokens"],
+            diag,
         )
         return jsonify(anthropic_resp)
 

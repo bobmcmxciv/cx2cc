@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Logged a per-request cache fingerprint (`prompt_cache_key`, tool count, cumulative content hashes snapshotted at fixed message indexes) plus the upstream's `cached_tokens` for both streamed and non-streamed responses. Consecutive turns of one conversation must match at every shared index, so when the upstream cache-hit collapses, the log now shows whether the prompt content diverged (and where) or the upstream dropped an intact prefix — a distinction that cannot be reconstructed afterwards.
+- Made the fallback id for `tool_use` blocks that arrive without one a pure function of the block's position instead of a random uuid. A random id serialized differently on every retransmission of the same history, which would break the upstream prompt cache at that offset for the rest of the conversation. (Observed Claude Code traffic always carries ids, so this is defensive.)
+
 - Added `GET /accounts` (alias `/v1/accounts`): forwards an upstream's account-pool view with the same key passthrough as `/usage`, for upstreams that serve from several subscriptions. The caller's query string is forwarded too, so upstream filters like `?usage=0` work through the proxy.
 - Added `GET /usage` (alias `/v1/usage`): forwards the upstream's usage/quota JSON with the same key passthrough as `/v1/messages`, so CC Switch can display remaining subscription quota. The upstream URL defaults to the base URL without its `/v1` suffix plus `/usage` and can be overridden with `CX2CC_USAGE_URL`.
 - Made server tests hermetic: a real `.env` next to `server.py` no longer leaks into tests and makes them hit a live upstream.
