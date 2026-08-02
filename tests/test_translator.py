@@ -1,6 +1,12 @@
 import json
 
-from translator import request_diag, translate_request, translate_response, stream_translate
+from translator import (
+    DEFAULT_STYLE_PROMPT,
+    request_diag,
+    stream_translate,
+    translate_request,
+    translate_response,
+)
 
 
 class FakeStreamResponse:
@@ -21,7 +27,8 @@ def event_payloads(chunks):
     return events
 
 
-def test_translate_request_text_system_and_options():
+def test_translate_request_text_system_and_options(monkeypatch):
+    monkeypatch.setenv("CX2CC_STYLE", "off")
     body = {
         "system": "You are helpful.",
         "messages": [{"role": "user", "content": "Hello"}],
@@ -41,7 +48,8 @@ def test_translate_request_text_system_and_options():
     assert result["stop"] == ["STOP"]
 
 
-def test_translate_request_tool_use_and_tool_result():
+def test_translate_request_tool_use_and_tool_result(monkeypatch):
+    monkeypatch.setenv("CX2CC_STYLE", "off")
     body = {
         "messages": [
             {
@@ -74,7 +82,8 @@ def test_translate_request_tool_use_and_tool_result():
     assert result["tool_choice"] == {"type": "function", "function": {"name": "search"}}
 
 
-def test_translate_request_image_block():
+def test_translate_request_image_block(monkeypatch):
+    monkeypatch.setenv("CX2CC_STYLE", "off")
     body = {
         "messages": [
             {
@@ -140,6 +149,52 @@ def test_prompt_cache_key_differs_between_conversations():
     assert len(keys) == 3
 
 
+def test_style_prompt_appended_to_system():
+    result = translate_request(
+        {"system": "You are helpful.", "messages": [{"role": "user", "content": "hi"}]}
+    )
+
+    system = result["messages"][0]
+    assert system["role"] == "system"
+    # appended, not prepended: the original prompt must stay at the front so the
+    # upstream prefix cache still matches across turns
+    assert system["content"].startswith("You are helpful.")
+    assert system["content"].endswith(DEFAULT_STYLE_PROMPT)
+
+
+def test_style_prompt_injected_when_no_system():
+    result = translate_request({"messages": [{"role": "user", "content": "hi"}]})
+
+    assert result["messages"][0] == {"role": "system", "content": DEFAULT_STYLE_PROMPT}
+
+
+def test_style_prompt_does_not_change_cache_key(monkeypatch):
+    body = {"system": "You are helpful.", "messages": [{"role": "user", "content": "hi"}]}
+    with_style = translate_request(body)["prompt_cache_key"]
+    monkeypatch.setenv("CX2CC_STYLE", "off")
+    without_style = translate_request(body)["prompt_cache_key"]
+
+    assert with_style == without_style
+
+
+def test_style_prompt_override_inline(monkeypatch):
+    monkeypatch.setenv("CX2CC_STYLE_PROMPT", "BE TERSE")
+
+    result = translate_request({"messages": [{"role": "user", "content": "hi"}]})
+
+    assert result["messages"][0]["content"] == "BE TERSE"
+
+
+def test_style_prompt_override_from_file(monkeypatch, tmp_path):
+    path = tmp_path / "style.md"
+    path.write_text("FROM FILE", encoding="utf-8")
+    monkeypatch.setenv("CX2CC_STYLE_PROMPT", str(path))
+
+    result = translate_request({"messages": [{"role": "user", "content": "hi"}]})
+
+    assert result["messages"][0]["content"] == "FROM FILE"
+
+
 def test_prompt_cache_key_disabled(monkeypatch):
     monkeypatch.setenv("CX2CC_PROMPT_CACHE_KEY", "off")
 
@@ -148,7 +203,8 @@ def test_prompt_cache_key_disabled(monkeypatch):
     assert "prompt_cache_key" not in result
 
 
-def test_missing_tool_use_id_fallback_is_deterministic():
+def test_missing_tool_use_id_fallback_is_deterministic(monkeypatch):
+    monkeypatch.setenv("CX2CC_STYLE", "off")
     body = {
         "messages": [
             {"role": "user", "content": "go"},

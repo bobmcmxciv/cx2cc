@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Appended a response-style addendum (`DEFAULT_STYLE_PROMPT`) to the system prompt of every translated request, asking the upstream model for conclusion-first, consolidated paragraphs instead of the one-short-block-per-tool-call narration that fragments transcripts. Appended rather than prepended so the upstream prefix cache and the per-conversation `prompt_cache_key` are unaffected. Disable with `CX2CC_STYLE=off`; override with `CX2CC_STYLE_PROMPT` (file path or literal text).
+
 - Logged a per-request cache fingerprint (`prompt_cache_key`, tool count, cumulative content hashes snapshotted at fixed message indexes) plus the upstream's `cached_tokens` for both streamed and non-streamed responses. Consecutive turns of one conversation must match at every shared index, so when the upstream cache-hit collapses, the log now shows whether the prompt content diverged (and where) or the upstream dropped an intact prefix — a distinction that cannot be reconstructed afterwards.
 - Made the fallback id for `tool_use` blocks that arrive without one a pure function of the block's position instead of a random uuid. A random id serialized differently on every retransmission of the same history, which would break the upstream prompt cache at that offset for the rest of the conversation. (Observed Claude Code traffic always carries ids, so this is defensive.)
 

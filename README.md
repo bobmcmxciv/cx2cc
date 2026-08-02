@@ -67,6 +67,15 @@ Two accounting caveats, inherited from OpenAI usage semantics:
 
 Set `CX2CC_PROMPT_CACHE_KEY=off` if your upstream rejects unknown request fields.
 
+## Response style injection
+
+cx2cc appends a style addendum to the system prompt of every `/v1/messages` request. Claude-shaped harnesses driving OpenAI-style models tend to produce fragmented transcripts — one short narration block per tool call instead of consolidated prose — and the default addendum (`translator.DEFAULT_STYLE_PROMPT`, written in Chinese) counters that: lead with the conclusion, write full paragraphs, no per-tool-call narration, no re-narrating tool output, structure only when content warrants it, length proportional to information.
+
+- The addendum is **appended, never prepended**, so the client's original system prompt stays a byte-identical prefix and the upstream's prefix cache keeps hitting across turns (one-time miss on the first request after changing the text). The per-conversation `prompt_cache_key` hashes the original client system prompt and is unaffected.
+- When the client sends no system prompt at all, the addendum is sent as the entire system message.
+- `CX2CC_STYLE=off` disables the injection.
+- `CX2CC_STYLE_PROMPT` overrides the default: if the value is a path to a readable file, the file's contents are used; otherwise the value itself is used literally.
+
 ## Usage endpoint
 
 `GET /usage` (alias `GET /v1/usage`) forwards the upstream's usage/quota JSON, so a tool like CC Switch can show remaining quota through cx2cc instead of reaching the upstream directly.
@@ -298,6 +307,8 @@ The Windows scripts use their own location to find the release/source directory.
 | `CX2CC_UPSTREAM_MODEL` | No | `gpt-5.5` | Model name requested from the upstream for every request. |
 | `CX2CC_REPORT_UPSTREAM_MODEL` | No | off | When `1`/`true`/`yes`/`on`, responses name the model the upstream says it served instead of echoing the client's requested model. |
 | `CX2CC_PROMPT_CACHE_KEY` | No | on | Set `off` to stop sending the per-conversation `prompt_cache_key` upstream. |
+| `CX2CC_STYLE` | No | on | Set `off` to stop appending the response-style addendum to the system prompt. |
+| `CX2CC_STYLE_PROMPT` | No | built-in | Replace the default style addendum: a readable file path (contents used) or literal text. |
 | `CX2CC_USAGE_URL` | No | derived | Upstream URL behind `GET /usage`. Defaults to the base URL without its `/v1` suffix plus `/usage`. |
 | `CX2CC_HOST` | No | `127.0.0.1` | Local listen host. |
 | `CX2CC_PORT` | No | `8901` | Local listen port. |

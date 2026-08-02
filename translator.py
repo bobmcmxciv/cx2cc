@@ -36,6 +36,50 @@ def prompt_cache_key_enabled() -> bool:
     )
 
 
+DEFAULT_STYLE_PROMPT = """
+<response_style>
+以下是对本次会话**面向人类的文字输出**的格式要求，优先级高于其它风格约定；它只约束你写给用户看的文字，不改变工具调用、代码内容与判断标准。
+
+**先说结论，再给依据。** 每次开口先给出这一步的结果或判断，再补支撑细节。不要把结论留到最后一段。
+
+**成段写，不要碎片化。** 一次输出就是一个完整的意思单元：用完整自然段（通常 2-5 句）表达，句子之间要有逻辑连接（因此/但是/所以先…再…）。禁止把一个意思拆成多次几十字的短输出。
+
+**不要为每个工具调用配旁白。** 连续执行多个工具时保持静默，把它们当作一个动作组；等这组动作有了结果，再用一段话交代"做了什么 → 得到什么 → 因此下一步"。只有当你要做的事有风险、耗时很长、或偏离用户预期时，才在动手前单独说明。
+
+**不复述工具输出。** 用户能看到命令和结果。只写输出里**不能直接读出**的东西：它意味着什么、是否符合预期、下一步因此怎么变。
+
+**结构服从内容，不要套模板。** 三项以上可并列、可对照的事实才用列表或表格；一两点就用句子说完。不要给短回答加小标题，不要用标题包裹只有一句话的段落。
+
+**长度与信息量匹配。** 简单问题两三句话答完；复杂结论才展开。宁可一段密实的话，也不要五行空洞的条目。
+</response_style>
+""".strip()
+
+
+def style_prompt() -> str:
+    """Human-facing output style addendum appended to the system prompt.
+
+    Upstreams driven through a Claude-shaped harness tend to emit one short
+    narration block per tool call, which fragments the transcript (observed:
+    194 assistant text blocks in one session, median 65 chars, 57% under 80).
+    This addendum asks for consolidated paragraphs instead.
+
+    Set CX2CC_STYLE=off to disable, or CX2CC_STYLE_PROMPT to a file path or
+    literal text to override the default.
+    """
+    if os.environ.get("CX2CC_STYLE", "").strip().lower() in ("0", "off", "false", "no"):
+        return ""
+    override = os.environ.get("CX2CC_STYLE_PROMPT", "").strip()
+    if override:
+        try:
+            if os.path.isfile(override):
+                with open(override, encoding="utf-8") as fh:
+                    return fh.read().strip()
+        except OSError as exc:
+            log.warning("CX2CC_STYLE_PROMPT unreadable (%s); using inline value", exc)
+        return override
+    return DEFAULT_STYLE_PROMPT
+
+
 def _prompt_cache_key(body: dict) -> str:
     """Stable per-conversation cache key for the upstream.
 
@@ -97,6 +141,7 @@ def translate_request(body: dict) -> dict:
 
     # System prompt -> system role message
     system_content = body.get("system")
+    system_text = ""
     if system_content:
         if isinstance(system_content, list):
             system_text = "\n".join(
@@ -105,8 +150,15 @@ def translate_request(body: dict) -> dict:
             )
         else:
             system_text = str(system_content)
-        if system_text.strip():
-            openai_body["messages"].append({"role": "system", "content": system_text})
+    # Appended, never prepended: the upstream caches by prompt prefix, so a
+    # constant suffix keeps every later turn's prefix identical (one-time miss
+    # on the first request after a change). _prompt_cache_key hashes the
+    # original `body["system"]`, so the conversation key is unaffected.
+    style = style_prompt()
+    if style:
+        system_text = (system_text.rstrip() + "\n\n" + style) if system_text.strip() else style
+    if system_text.strip():
+        openai_body["messages"].append({"role": "system", "content": system_text})
 
     # Messages: content blocks -> OpenAI messages
     for msg_idx, msg in enumerate(body.get("messages", [])):

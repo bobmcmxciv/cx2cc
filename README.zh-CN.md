@@ -67,6 +67,15 @@ cx2cc 自身不缓存任何内容，但会让上游的自动 prompt 缓存持续
 
 如果你的上游会拒绝未知请求字段，设置 `CX2CC_PROMPT_CACHE_KEY=off` 关闭该功能。
 
+## 回复风格注入
+
+cx2cc 会在每个 `/v1/messages` 请求的 system prompt 末尾追加一段风格约定。用 Claude 形态的 harness 驱动 OpenAI 风格模型时，输出容易碎片化——每次工具调用配一小段旁白，而不是成段的完整叙述；默认约定（`translator.DEFAULT_STYLE_PROMPT`，中文）针对性地要求：先说结论、成段写作、不为每个工具调用配旁白、不复述工具输出、结构服从内容、长度与信息量匹配。
+
+- 风格段**只追加、不前置**：客户端原始 system prompt 保持字节级前缀不变，上游前缀缓存跨轮继续命中（改动文本后仅首个请求一次性 miss）。会话级 `prompt_cache_key` 只哈希客户端原始 system prompt，不受影响。
+- 客户端完全没发 system prompt 时，风格段单独作为 system 消息发送。
+- `CX2CC_STYLE=off` 关闭注入。
+- `CX2CC_STYLE_PROMPT` 覆盖默认值：值是可读文件路径时用文件内容，否则按字面文本使用。
+
 ## 用量端点
 
 `GET /usage`（别名 `GET /v1/usage`）把上游的用量/额度 JSON 转发给客户端，让 CC Switch 之类的工具通过 cx2cc 查看剩余额度，而不必直连上游。
@@ -298,6 +307,8 @@ Windows 脚本会根据脚本自身位置定位 release/源码目录。release �
 | `CX2CC_UPSTREAM_MODEL` | 否 | `gpt-5.5` | 每个请求向上游申请的模型名。 |
 | `CX2CC_REPORT_UPSTREAM_MODEL` | 否 | 关 | 设为 `1`/`true`/`yes`/`on` 时，响应中报告上游实际服务的模型，而不是回显客户端请求的模型名。 |
 | `CX2CC_PROMPT_CACHE_KEY` | 否 | 开 | 设为 `off` 时不再向上游发送会话级 `prompt_cache_key`。 |
+| `CX2CC_STYLE` | 否 | 开 | 设为 `off` 时不再向 system prompt 追加回复风格段。 |
+| `CX2CC_STYLE_PROMPT` | 否 | 内置 | 覆盖默认风格段：可读文件路径（取文件内容）或字面文本。 |
 | `CX2CC_USAGE_URL` | 否 | 派生 | `GET /usage` 背后的上游地址；默认为 base URL 去掉 `/v1` 后缀再拼上 `/usage`。 |
 | `CX2CC_HOST` | 否 | `127.0.0.1` | 本地监听地址。 |
 | `CX2CC_PORT` | 否 | `8901` | 本地监听端口。 |
