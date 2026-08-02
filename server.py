@@ -114,22 +114,28 @@ def _chat_url() -> str | None:
     return f"{base_url}/chat/completions"
 
 
-def _usage_url() -> str | None:
-    """Upstream endpoint behind GET /usage.
-
-    Defaults to `<base URL without its /v1 suffix>/usage`, which matches
-    codex-bridge; `CX2CC_USAGE_URL` overrides it for upstreams that expose
-    usage elsewhere. Upstreams without such an endpoint answer 404, which is
+def _sibling_url(name: str) -> str | None:
+    """`<base URL without its /v1 suffix>/<name>`, which is where codex-bridge
+    keeps its side endpoints. Upstreams without one answer 404, which is
     forwarded as-is.
     """
-    explicit = os.environ.get("CX2CC_USAGE_URL", "").strip()
-    if explicit:
-        return explicit
     base_url = _get_upstream_base_url()
     if not base_url:
         return None
     root = base_url[: -len("/v1")] if base_url.endswith("/v1") else base_url
-    return f"{root}/usage"
+    return f"{root}/{name}"
+
+
+def _usage_url() -> str | None:
+    """Upstream endpoint behind GET /usage.
+
+    Defaults to the codex-bridge layout; `CX2CC_USAGE_URL` overrides it for
+    upstreams that expose usage elsewhere.
+    """
+    explicit = os.environ.get("CX2CC_USAGE_URL", "").strip()
+    if explicit:
+        return explicit
+    return _sibling_url("usage")
 
 
 def _get_fallback_key(keys: list[str]) -> str | None:
@@ -345,8 +351,23 @@ def handle_usage():
     upstream's 401 rather than leaking anything. The body is returned verbatim
     on success only; upstream error bodies stay hidden as elsewhere.
     """
-    usage_url = _usage_url()
-    if not usage_url:
+    return _forward_get(_usage_url(), "usage")
+
+
+@app.route("/v1/accounts", methods=["GET"])
+@app.route("/accounts", methods=["GET"])
+def handle_accounts():
+    """Forward an upstream account-pool view, for upstreams that keep one.
+
+    Upstreams that multiplex several subscriptions (e.g. codex-bridge) expose
+    which one is serving and which are parked on a spent quota. Upstreams
+    without the endpoint answer 404 and that is forwarded as-is.
+    """
+    return _forward_get(_sibling_url("accounts"), "accounts")
+
+
+def _forward_get(url: str | None, label: str):
+    if not url:
         return _err(502, "No upstream base URL configured (set CX2CC_UPSTREAM_BASE_URL)")
 
     keys = _candidate_keys(_request_api_key())
@@ -357,13 +378,14 @@ def handle_usage():
     for key in keys:
         try:
             upstream = requests.get(
-                usage_url,
+                url,
                 headers={"Authorization": f"Bearer {key}"},
+                params=request.args,
                 timeout=30,
             )
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
             _record_key_error(key)
-            log.warning("Usage upstream connection failed: %s", type(exc).__name__)
+            log.warning("%s upstream connection failed: %s", label, type(exc).__name__)
             continue
 
         if upstream.status_code != 200:
@@ -378,8 +400,8 @@ def handle_usage():
         try:
             return jsonify(upstream.json())
         except Exception:
-            log.exception("Usage response was not valid JSON")
-            return _err(502, "Upstream usage response was not valid JSON")
+            log.exception("%s response was not valid JSON", label)
+            return _err(502, f"Upstream {label} response was not valid JSON")
 
     if last_upstream is not None:
         return _forward_err(last_upstream)

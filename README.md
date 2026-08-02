@@ -21,6 +21,7 @@ OpenAI-compatible upstream
 - `POST /v1/messages` compatibility shim
 - `GET /v1/models` compatibility shim
 - `GET /usage` passthrough of the upstream's quota/rate-limit JSON, for usage display in CC Switch
+- `GET /accounts` passthrough for upstreams that serve from a pool of subscriptions
 - Streaming Server-Sent Events translation
 - Text, image, tool use, and tool result translation for common Claude Code flows
 - Per-conversation `prompt_cache_key` so upstream automatic prompt caching keeps hitting across turns, with cache reads reported back to the client
@@ -45,7 +46,7 @@ The supported target is the practical subset used by Claude Code / CC Switch aga
 
 Known limitations:
 
-- Only `/v1/messages`, `/v1/models`, `/usage`, and `/health` are exposed.
+- Only `/v1/messages`, `/v1/models`, `/usage`, `/accounts`, and `/health` are exposed.
 - Batches, Files, token counting, server-side Anthropic tools, structured outputs, and native thinking blocks are not fully implemented.
 - Prompt caching relies on the upstream's automatic caching (see [Prompt caching](#prompt-caching)); Anthropic `cache_control` markers are ignored.
 - Streaming token usage depends on the upstream sending a usage chunk (`stream_options.include_usage` is requested automatically); if the upstream sends none, input tokens are reported as `0`.
@@ -75,6 +76,8 @@ Set `CX2CC_PROMPT_CACHE_KEY=off` if your upstream rejects unknown request fields
 - cx2cc does not interpret the payload. Whatever JSON the upstream answers with HTTP 200 is returned verbatim; the payload shape is therefore upstream-defined. Upstreams without a usage endpoint answer 404, forwarded as a status code only.
 
 In CC Switch, enable usage query on the provider card with a custom script that requests `{{baseUrl}}/usage` with header `x-api-key: {{apiKey}}` and extracts whatever fields your upstream serves.
+
+`GET /accounts` (alias `GET /v1/accounts`) is the same kind of passthrough, for upstreams that multiplex several subscriptions and expose which one is currently serving. The query string is forwarded, so upstream filters such as `?usage=0` keep working through cx2cc. Upstreams without the endpoint answer 404, forwarded as-is.
 
 ## Requirements
 

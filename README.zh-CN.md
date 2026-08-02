@@ -21,6 +21,7 @@ OpenAI-compatible upstream
 - 兼容 `POST /v1/messages`
 - 兼容 `GET /v1/models`
 - `GET /usage` 透传上游的额度/限额 JSON，供 CC Switch 展示用量
+- `GET /accounts` 透传上游的账号池视图，适用于上游用多个订阅轮换的场景
 - 支持流式 SSE 事件转换
 - 支持 Claude Code 常见流程里的文本、图片、工具调用和工具结果转换
 - 按会话生成稳定的 `prompt_cache_key`，让上游自动 prompt 缓存跨轮持续命中，并把缓存读取量回报给客户端
@@ -45,7 +46,7 @@ cx2cc 不是 Anthropic 官方 API，也不实现 Anthropic API 的全部功能�
 
 已知限制：
 
-- 只暴露 `/v1/messages`、`/v1/models`、`/usage` 和 `/health`。
+- 只暴露 `/v1/messages`、`/v1/models`、`/usage`、`/accounts` 和 `/health`。
 - Batches、Files、token counting、Anthropic server-side tools、structured outputs、原生 thinking blocks 等能力尚未完整实现。
 - Prompt 缓存依赖上游的自动缓存（见 [Prompt 缓存](#prompt-缓存)）；请求中的 Anthropic `cache_control` 标记会被忽略。
 - 流式 token usage 取决于上游是否返回 usage chunk（代理会自动请求 `stream_options.include_usage`）；上游不返回时 input tokens 记为 `0`。
@@ -75,6 +76,8 @@ cx2cc 自身不缓存任何内容，但会让上游的自动 prompt 缓存持续
 - cx2cc 不解释响应内容：上游 HTTP 200 返回什么 JSON，客户端就收到什么，字段结构由上游决定。上游没有用量端点时会返回 404，仅转发状态码。
 
 在 CC Switch 中，在供应商卡片上启用用量查询，用自定义脚本请求 `{{baseUrl}}/usage`（请求头 `x-api-key: {{apiKey}}`），再按上游实际字段写提取逻辑即可。
+
+`GET /accounts`（别名 `GET /v1/accounts`）是同样的透传，用于上游同时挂了多个订阅、需要知道当前由哪个账号服务的场景。查询串会一并转发，因此 `?usage=0` 之类的上游过滤参数经过 cx2cc 依然有效；上游没有该端点时返回 404，原样转发。
 
 ## 环境要求
 

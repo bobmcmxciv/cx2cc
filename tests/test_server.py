@@ -187,7 +187,7 @@ def test_usage_forwards_upstream_json(server_module, monkeypatch):
 
     calls = []
 
-    def fake_get(url, headers, timeout):
+    def fake_get(url, headers, timeout, **kwargs):
         calls.append((url, headers, timeout))
         return FakeResponse()
 
@@ -215,7 +215,7 @@ def test_usage_v1_alias_and_explicit_url_override(server_module, monkeypatch):
 
     calls = []
 
-    def fake_get(url, headers, timeout):
+    def fake_get(url, headers, timeout, **kwargs):
         calls.append(url)
         return FakeResponse()
 
@@ -226,6 +226,35 @@ def test_usage_v1_alias_and_explicit_url_override(server_module, monkeypatch):
 
     assert response.status_code == 200
     assert calls == ["https://elsewhere.test/quota"]
+
+
+def test_accounts_forwards_pool_view_with_query(server_module, monkeypatch):
+    monkeypatch.setenv("CX2CC_UPSTREAM_BASE_URL", "https://example.test/v1")
+    payload = {"active": "pro-a", "accounts": [{"id": "pro-a", "available": True}]}
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return payload
+
+    calls = []
+
+    def fake_get(url, headers, timeout, **kwargs):
+        calls.append((url, kwargs.get("params")))
+        return FakeResponse()
+
+    monkeypatch.setattr(server_module.requests, "get", fake_get)
+    client = server_module.app.test_client()
+
+    response = client.get("/accounts?usage=0", headers={"x-api-key": "key"})
+
+    assert response.status_code == 200
+    assert response.json == payload
+    assert calls[0][0] == "https://example.test/accounts"
+    # The query string travels on, so ?usage=0 / ?account=<id> keep working
+    # through the proxy.
+    assert dict(calls[0][1]) == {"usage": "0"}
 
 
 def test_usage_upstream_error_body_is_not_exposed(server_module, monkeypatch):

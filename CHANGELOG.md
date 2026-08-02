@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added `GET /accounts` (alias `/v1/accounts`): forwards an upstream's account-pool view with the same key passthrough as `/usage`, for upstreams that serve from several subscriptions. The caller's query string is forwarded too, so upstream filters like `?usage=0` work through the proxy.
 - Added `GET /usage` (alias `/v1/usage`): forwards the upstream's usage/quota JSON with the same key passthrough as `/v1/messages`, so CC Switch can display remaining subscription quota. The upstream URL defaults to the base URL without its `/v1` suffix plus `/usage` and can be overridden with `CX2CC_USAGE_URL`.
 - Made server tests hermetic: a real `.env` next to `server.py` no longer leaks into tests and makes them hit a live upstream.
 
