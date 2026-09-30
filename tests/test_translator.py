@@ -1,8 +1,14 @@
 import json
 
+import pytest
+
 from translator import (
     DEFAULT_STYLE_PROMPT,
+    TOOL_RESULT_IMAGE_PLACEHOLDER,
+    TOOL_RESULT_IMAGE_PREAMBLE,
+    prepare_openai_passthrough,
     request_diag,
+    resolve_model,
     stream_translate,
     translate_request,
     translate_response,
@@ -104,6 +110,113 @@ def test_translate_request_image_block(monkeypatch):
     content = result["messages"][0]["content"]
     assert content[0] == {"type": "text", "text": "Describe"}
     assert content[1] == {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}}
+
+
+def _read_png_tool_result(text=None, data="abc"):
+    """The shape Claude Code's Read tool returns for a PNG."""
+    content = [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": data}}]
+    if text is not None:
+        content.insert(0, {"type": "text", "text": text})
+    return {"type": "tool_result", "tool_use_id": "toolu_1", "content": content}
+
+
+def _read_png_body(*tool_results, user_text=None):
+    content = list(tool_results)
+    if user_text is not None:
+        content.append({"type": "text", "text": user_text})
+    return {
+        "messages": [
+            {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {"file_path": "a.png"}}],
+            },
+            {"role": "user", "content": content},
+        ]
+    }
+
+
+def test_tool_result_image_reaches_upstream(monkeypatch):
+    monkeypatch.setenv("CX2CC_STYLE", "off")
+
+    result = translate_request(_read_png_body(_read_png_tool_result()))
+
+    # The tool message stays text-only (OpenAI's `tool` role carries no images),
+    # and the image rides in a user message right after it.
+    tool_msg, carrier = result["messages"][1], result["messages"][2]
+    assert tool_msg == {
+        "role": "tool",
+        "tool_call_id": "toolu_1",
+        "content": TOOL_RESULT_IMAGE_PLACEHOLDER,
+    }
+    assert carrier["role"] == "user"
+    assert carrier["content"] == [
+        {"type": "text", "text": TOOL_RESULT_IMAGE_PREAMBLE},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
+    ]
+
+
+def test_tool_result_keeps_its_text_alongside_the_image(monkeypatch):
+    monkeypatch.setenv("CX2CC_STYLE", "off")
+
+    result = translate_request(_read_png_body(_read_png_tool_result(text="1 file read")))
+
+    assert result["messages"][1]["content"] == "1 file read"
+    assert result["messages"][2]["content"][1]["image_url"]["url"] == "data:image/png;base64,abc"
+
+
+def test_tool_result_images_are_emitted_after_all_tool_messages(monkeypatch):
+    """`tool` messages must stay adjacent to the assistant turn they answer."""
+    monkeypatch.setenv("CX2CC_STYLE", "off")
+    second = dict(_read_png_tool_result(data="def"), tool_use_id="toolu_2")
+
+    result = translate_request(_read_png_body(_read_png_tool_result(), second))
+
+    assert [m["role"] for m in result["messages"]] == ["assistant", "tool", "tool", "user"]
+    urls = [p["image_url"]["url"] for p in result["messages"][3]["content"][1:]]
+    assert urls == ["data:image/png;base64,abc", "data:image/png;base64,def"]
+
+
+def test_text_only_tool_result_gets_no_placeholder(monkeypatch):
+    """The placeholder must not leak onto a sibling result that had no image."""
+    monkeypatch.setenv("CX2CC_STYLE", "off")
+    text_only = {"type": "tool_result", "tool_use_id": "toolu_2", "content": [{"type": "text", "text": ""}]}
+
+    result = translate_request(_read_png_body(_read_png_tool_result(), text_only))
+
+    assert result["messages"][1]["content"] == TOOL_RESULT_IMAGE_PLACEHOLDER
+    assert result["messages"][2]["content"] == ""
+
+
+def test_image_only_user_message_does_not_crash(monkeypatch):
+    """A lone image part has no "text" key to unwrap it by."""
+    monkeypatch.setenv("CX2CC_STYLE", "off")
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "abc"}}
+                ],
+            }
+        ]
+    }
+
+    result = translate_request(body)
+
+    assert result["messages"][0]["content"] == [
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}}
+    ]
+
+
+def test_tool_result_image_translation_is_deterministic(monkeypatch):
+    """Same history in, byte-identical request out — or the prompt cache misses."""
+    monkeypatch.setenv("CX2CC_STYLE", "off")
+    body = _read_png_body(_read_png_tool_result(), user_text="what does it say?")
+
+    first = translate_request(body)
+    second = translate_request(body)
+
+    assert json.dumps(first, sort_keys=True) == json.dumps(second, sort_keys=True)
 
 
 def test_prompt_cache_key_stable_across_turns():
@@ -319,3 +432,177 @@ def test_stream_translate_text_events():
     )
     assert events[-2][1]["delta"]["stop_reason"] == "end_turn"
     assert events[-1][0] == "message_stop"
+
+
+def test_prepare_openai_passthrough_leaves_body_intact(monkeypatch):
+    """Only additive/allowlist changes — the shape and fields the client sent stay put."""
+    monkeypatch.setenv("CX2CC_UPSTREAM_MODEL", "gpt-5.5")
+    monkeypatch.setenv("CX2CC_MODEL_PASSTHROUGH", "gpt-5.5,gpt-5.4")
+    monkeypatch.setenv("CX2CC_MODEL_ALIASES", "")
+    monkeypatch.setenv("CX2CC_PROMPT_CACHE_KEY", "off")
+
+    body = {
+        "model": "gpt-5.4",
+        "messages": [
+            {"role": "system", "content": "you are helpful"},
+            {"role": "user", "content": "hi"},
+        ],
+        "temperature": 0.3,
+        "tools": [{"type": "function", "function": {"name": "noop", "parameters": {}}}],
+    }
+
+    prepared = prepare_openai_passthrough(body)
+
+    assert prepared["model"] == "gpt-5.4"
+    assert prepared["messages"] == body["messages"]
+    assert prepared["temperature"] == 0.3
+    assert prepared["tools"] == body["tools"]
+    # Not injected when disabled.
+    assert "prompt_cache_key" not in prepared
+    assert "stream_options" not in prepared
+    # Original dict is not mutated.
+    assert "prompt_cache_key" not in body
+
+
+def test_prepare_openai_passthrough_unknown_model_falls_back_under_default_policy(monkeypatch):
+    # Pre-2026-09-06 behaviour, now opt-in: CX2CC_UNKNOWN_MODEL=default.
+    monkeypatch.setenv("CX2CC_UPSTREAM_MODEL", "gpt-5.5")
+    monkeypatch.setenv("CX2CC_MODEL_PASSTHROUGH", "")
+    monkeypatch.setenv("CX2CC_UNKNOWN_MODEL", "default")
+
+    prepared = prepare_openai_passthrough({
+        "model": "unknown-slug",
+        "messages": [{"role": "user", "content": "hi"}],
+    })
+
+    assert prepared["model"] == "gpt-5.5"
+
+
+def test_prepare_openai_passthrough_unknown_model_is_rejected_by_default(monkeypatch):
+    monkeypatch.setenv("CX2CC_UPSTREAM_MODEL", "gpt-5.5")
+    monkeypatch.setenv("CX2CC_MODEL_PASSTHROUGH", "gpt-5.5")
+    monkeypatch.delenv("CX2CC_UNKNOWN_MODEL", raising=False)
+
+    from translator import UnknownModelError
+
+    with pytest.raises(UnknownModelError) as excinfo:
+        prepare_openai_passthrough({
+            "model": "unknown-slug",
+            "messages": [{"role": "user", "content": "hi"}],
+        })
+    assert excinfo.value.requested == "unknown-slug"
+    assert "gpt-5.5" in excinfo.value.allowed
+
+
+def test_prepare_openai_passthrough_adds_cache_key_and_stream_options(monkeypatch):
+    monkeypatch.setenv("CX2CC_MODEL_PASSTHROUGH", "gpt-5.5")
+    monkeypatch.setenv("CX2CC_MODEL_ALIASES", "")
+    monkeypatch.setenv("CX2CC_PROMPT_CACHE_KEY", "on")
+
+    prepared = prepare_openai_passthrough({
+        "model": "gpt-5.5",
+        "stream": True,
+        "messages": [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "first turn"},
+        ],
+    })
+
+    assert prepared["stream_options"] == {"include_usage": True}
+    assert prepared["prompt_cache_key"]
+
+    # Stable per (system, first-user), so both turns of the same conversation
+    # hash to the same routing key.
+    prepared2 = prepare_openai_passthrough({
+        "model": "gpt-5.5",
+        "messages": [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "first turn"},
+            {"role": "assistant", "content": "..."},
+            {"role": "user", "content": "second turn"},
+        ],
+    })
+    assert prepared2["prompt_cache_key"] == prepared["prompt_cache_key"]
+
+    # Different first user message → different key.
+    prepared3 = prepare_openai_passthrough({
+        "model": "gpt-5.5",
+        "messages": [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "different opener"},
+        ],
+    })
+    assert prepared3["prompt_cache_key"] != prepared["prompt_cache_key"]
+
+
+def test_prepare_openai_passthrough_preserves_client_cache_key(monkeypatch):
+    monkeypatch.setenv("CX2CC_MODEL_PASSTHROUGH", "gpt-5.5")
+    monkeypatch.setenv("CX2CC_MODEL_ALIASES", "")
+    monkeypatch.setenv("CX2CC_PROMPT_CACHE_KEY", "on")
+
+    prepared = prepare_openai_passthrough({
+        "model": "gpt-5.5",
+        "prompt_cache_key": "client-supplied",
+        "messages": [{"role": "user", "content": "hi"}],
+    })
+
+    assert prepared["prompt_cache_key"] == "client-supplied"
+
+
+def test_prepare_openai_passthrough_does_not_inject_style_prompt(monkeypatch):
+    monkeypatch.setenv("CX2CC_MODEL_PASSTHROUGH", "gpt-5.5")
+    monkeypatch.setenv("CX2CC_MODEL_ALIASES", "")
+    """OpenAI-format callers compose their own system messages; the Claude Code
+    output-style addendum belongs only on the Anthropic path."""
+    monkeypatch.setenv("CX2CC_STYLE", "on")
+
+    prepared = prepare_openai_passthrough({
+        "model": "gpt-5.5",
+        "messages": [
+            {"role": "system", "content": "you are helpful"},
+            {"role": "user", "content": "hi"},
+        ],
+    })
+
+    assert prepared["messages"][0]["content"] == "you are helpful"
+
+
+def test_resolve_model_alias_remaps_pinned_slug(monkeypatch):
+    """A fleet that pins gpt-5.6-sol client-side can be moved server-side."""
+    monkeypatch.setenv("CX2CC_UPSTREAM_MODEL", "gpt-6-astra")
+    monkeypatch.setenv("CX2CC_MODEL_PASSTHROUGH", "gpt-6-astra,gpt-5.6-sol,gpt-5.6-terra")
+    monkeypatch.setenv("CX2CC_MODEL_ALIASES", "gpt-5.6-sol=gpt-6-astra, gpt-5.4=gpt-6-astra")
+
+    assert resolve_model("gpt-5.6-sol") == "gpt-6-astra"
+    # Window marker is stripped before the alias lookup.
+    assert resolve_model("gpt-5.6-sol[1m]") == "gpt-6-astra"
+    assert resolve_model("gpt-5.4") == "gpt-6-astra"
+    # Non-aliased passthrough slugs are untouched.
+    assert resolve_model("gpt-5.6-terra") == "gpt-5.6-terra"
+    # Unknown names still take the pinned default.
+    assert resolve_model("claude-opus-4-8") == "gpt-6-astra"
+
+
+def test_resolve_model_alias_target_must_be_allowlisted(monkeypatch):
+    monkeypatch.setenv("CX2CC_UPSTREAM_MODEL", "gpt-5.6-terra")
+    monkeypatch.setenv("CX2CC_MODEL_PASSTHROUGH", "gpt-5.6-terra,gpt-5.6-sol")
+    monkeypatch.setenv("CX2CC_MODEL_ALIASES", "gpt-5.6-sol=not-a-real-slug")
+
+    assert resolve_model("gpt-5.6-sol") == "gpt-5.6-terra"
+
+
+def test_resolve_model_alias_ignores_malformed_entries(monkeypatch):
+    monkeypatch.setenv("CX2CC_UPSTREAM_MODEL", "gpt-6-astra")
+    monkeypatch.setenv("CX2CC_MODEL_PASSTHROUGH", "gpt-6-astra,gpt-5.6-sol")
+    monkeypatch.setenv("CX2CC_MODEL_ALIASES", "garbage,=x,gpt-5.6-sol=")
+
+    assert resolve_model("gpt-5.6-sol") == "gpt-5.6-sol"
+
+
+def test_resolve_model_no_alias_env_is_identity(monkeypatch):
+    monkeypatch.setenv("CX2CC_UPSTREAM_MODEL", "gpt-6-astra")
+    monkeypatch.setenv("CX2CC_MODEL_PASSTHROUGH", "gpt-6-astra,gpt-5.6-sol")
+    monkeypatch.delenv("CX2CC_MODEL_ALIASES", raising=False)
+
+    assert resolve_model("gpt-5.6-sol") == "gpt-5.6-sol"
+
