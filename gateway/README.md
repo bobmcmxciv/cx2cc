@@ -165,6 +165,26 @@ python -m cx2cc_gateway list-keys
 The CLI writes the same database; a running gateway picks key changes up within
 five seconds.
 
+### Importing history
+
+Usage from before the gateway can be rebuilt from cx2cc's and codex-bridge's
+own logs and shown alongside live data (daily totals only, attributed to one
+key, typically the imported shared token):
+
+```bash
+python tools/import_cx2cc_logs.py /path/to/codex-bridge/logs --cutoff-ms <first gateway request> > history.json
+docker exec -i cx2cc-gateway python -m cx2cc_gateway import-history   --key legacy-shared --source cx2cc-logs < history.json
+```
+
+`--cutoff-ms` is the timestamp of the first request the gateway recorded
+(`SELECT MIN(ts) FROM requests`), so nothing is counted twice. Messages and
+non-streamed Chat Completions calls come back with full token counts, image
+calls with their image tokens; Responses and streamed Chat Completions calls
+are counted without tokens, because cx2cc never logged them. Models are joined
+through the conversation key the bridge logs. Re-running with the same
+`--source` replaces the earlier import. Reports read the `usage_all` view, i.e.
+live rollups plus imported history.
+
 ## Development
 
 ```bash

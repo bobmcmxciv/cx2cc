@@ -119,7 +119,16 @@ const ACTION_NAMES = {
   "key.update": "修改 Key", "key.disable": "停用 Key", "key.enable": "启用 Key", "key.revoke": "吊销 Key",
   "key.rotate": "轮换 Key", "user.create": "创建账号", "user.update": "修改账号",
   "user.password_changed": "修改密码", "settings.update": "修改设置", "audit.export": "导出审计记录",
+  "usage.import_history": "导入历史用量",
 };
+
+function historyNotice(hist) {
+  if (!hist || !hist.first_day) return null;
+  const until = hist.cutoff_ms ? fmtTime(hist.cutoff_ms, false) : hist.last_day;
+  return h("div", { class: "notice" },
+    `${hist.first_day} 至 ${until} 的用量是从 cx2cc 与 codex-bridge 日志还原的历史数据，记在「${hist.key}」名下（当时全员共用一个 token，无法按人拆分）。`,
+    "历史部分只有按日汇总，没有逐条调用记录；Codex CLI（Responses）与流式 Chat 的历史只有请求次数，不含 token。");
+}
 const PERM_NAMES = {
   "keys.view_all": "查看全部 Key 及用量", "keys.create": "创建 API Key", "keys.manage_all": "管理全部 Key",
   "keys.manage_own": "管理自己创建的 Key", "keys.grant_accounts": "授予账号池范围",
@@ -658,7 +667,7 @@ VIEWS.overview = async (main, route, ctx) => {
     ? h("span", { class: "badge ok" }, "上游 cx2cc 正常")
     : h("span", { class: "badge err" }, upstream ? "上游 cx2cc 不可达" : "上游状态未知");
 
-  main.replaceChildren(head, h("div", { class: "filters" }, health), tiles, chart,
+  main.replaceChildren(head, h("div", { class: "filters" }, health), historyNotice(d.history), tiles, chart,
     byKey, h("div", { class: "grid2 gap-below" }, byOwner, byModel), errors);
 };
 
@@ -714,7 +723,8 @@ VIEWS.keys = async (main, route, ctx) => {
 
 VIEWS.key = async (main, route, ctx) => {
   const id = Number(route.arg);
-  const d = await api("GET", `keys/${id}?days=30`);
+  const days = Number(route.params.get("days")) === 90 ? 90 : 30;
+  const d = await api("GET", `keys/${id}?days=${days}`);
   if (!ctx.alive()) return;
   const k = d.key;
   const u = k.usage || {};
@@ -732,13 +742,17 @@ VIEWS.key = async (main, route, ctx) => {
     h("div", null,
       h("h1", null, k.alias, " ", statusBadge(k.status)),
       h("div", { class: "sub" }, (k.owner ? `使用人 ${k.owner} · ` : "") + `前缀 ${k.key_prefix}…`)),
-    h("div", { class: "head-actions" }, actions));
+    h("div", { class: "head-actions" },
+      h("div", { class: "seg" }, [30, 90].map((n) =>
+        h("button", { class: n === days ? "on" : null, onclick: () => go(`#/key/${id}?days=${n}`) }, `近 ${n} 天`))),
+      actions));
 
   const notices = [];
   if (k.rotation_grace_until) {
     notices.push(h("div", { class: "notice warn" }, `这把 Key 刚轮换过，旧值在 ${fmtTime(k.rotation_grace_until)} 之前仍然有效。`));
   }
   if (k.expires_at && k.expires_at < Date.now()) notices.push(h("div", { class: "notice err" }, "这把 Key 已过期，请求会被拒绝。"));
+  if (d.history && d.history.key === k.alias) notices.push(historyNotice(d.history));
 
   const meters = [];
   const meter = (label, used, limit) => {
@@ -771,11 +785,11 @@ VIEWS.key = async (main, route, ctx) => {
     k.revoked_at ? [h("dt", null, "吊销时间"), h("dd", null, fmtTime(k.revoked_at))] : null,
   ), meters.length ? h("div", { class: "stack" }, h("div"), meters) : null);
 
-  const labels30 = dayRange(30, localDay(Date.now()));
+  const labelsN = dayRange(days, localDay(Date.now()));
   const byDay = Object.fromEntries(d.daily.map((r) => [r.day, r]));
-  const dailyChart = chartCard("每日加权用量（30 天）", null, {
-    labels: labels30,
-    series: [{ name: "加权用量", color: "var(--s1)", values: labels30.map((l) => (byDay[l] ? byDay[l].weighted : 0)) }],
+  const dailyChart = chartCard(`每日加权用量（${days} 天）`, null, {
+    labels: labelsN,
+    series: [{ name: "加权用量", color: "var(--s1)", values: labelsN.map((l) => (byDay[l] ? byDay[l].weighted : 0)) }],
     fmt: fmtCompact, shortLabel: (l) => l.slice(5), ariaLabel: "每日加权用量",
   });
 
@@ -789,7 +803,7 @@ VIEWS.key = async (main, route, ctx) => {
     fmt: fmtInt, shortLabel: (l) => l.slice(11), ariaLabel: "每小时请求数",
   });
 
-  const models = h("div", { class: "card" }, h("h2", null, "模型分布（30 天）"), table([
+  const models = h("div", { class: "card" }, h("h2", null, `模型分布（${days} 天）`), table([
     { title: "实际模型", render: (r) => modelName(r.model) },
     { title: "请求", cls: "num", render: (r) => fmtInt(r.requests) },
     { title: "输入", cls: "num", render: (r) => fmtCompact(r.input_tokens) },
@@ -957,7 +971,7 @@ VIEWS.events = async (main, route, ctx) => {
   const d = await api("GET", "events?" + q);
   if (!ctx.alive()) return;
   const sel = h("select", null, h("option", { value: "" }, "全部动作"),
-    [["key.", "Key 相关"], ["login", "登录"], ["portal.", "Key 自助登录"], ["user.", "账号相关"], ["settings.", "设置"], ["audit.", "审计导出"]]
+    [["key.", "Key 相关"], ["login", "登录"], ["portal.", "Key 自助登录"], ["user.", "账号相关"], ["settings.", "设置"], ["audit.", "审计导出"], ["usage.", "历史导入"]]
       .map(([v, l]) => h("option", { value: v, selected: v === action ? true : null }, l)));
   sel.addEventListener("change", () => go("#/events" + (sel.value ? "?action=" + encodeURIComponent(sel.value) : "")));
   const list = eventsTable(d.events);

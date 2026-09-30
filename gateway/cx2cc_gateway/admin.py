@@ -330,10 +330,14 @@ class Console:
         raise web.HTTPMovedPermanently("/admin/")
 
     async def index(self, request):
-        return web.FileResponse(
-            STATIC_DIR / "index.html",
-            headers={"Cache-Control": "no-cache", "Content-Type": "text/html; charset=utf-8"},
-        )
+        # Version the asset URLs by their mtime so a deploy reaches every
+        # browser at once instead of waiting on its cached copy.
+        html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+        for name in ("app.js", "app.css"):
+            version = int((STATIC_DIR / name).stat().st_mtime)
+            html = html.replace(f"static/{name}", f"static/{name}?v={version}")
+        return web.Response(text=html, content_type="text/html", charset="utf-8",
+                            headers={"Cache-Control": "no-cache"})
 
     async def static(self, request):
         name = request.match_info["name"]
@@ -465,14 +469,14 @@ class Console:
                 "SELECT COALESCE(SUM(requests),0) AS requests, COALESCE(SUM(errors),0) AS errors, "
                 "COALESCE(SUM(input_tokens),0) AS input_tokens, COALESCE(SUM(cached_tokens),0) AS cached_tokens, "
                 "COALESCE(SUM(output_tokens),0) AS output_tokens, COALESCE(SUM(weighted),0) AS weighted "
-                f"FROM usage_daily WHERE day >= ? AND {cond}",
+                f"FROM usage_all WHERE day >= ? AND {cond}",
                 [since, *args],
             )
             return row
 
         per_day_key = self.db.all(
             "SELECT u.day, u.key_id, k.alias, SUM(u.weighted) AS weighted, SUM(u.requests) AS requests "
-            f"FROM usage_daily u LEFT JOIN api_keys k ON k.id = u.key_id WHERE u.day >= ? AND {ucond} "
+            f"FROM usage_all u LEFT JOIN api_keys k ON k.id = u.key_id WHERE u.day >= ? AND {ucond} "
             "GROUP BY u.day, u.key_id ORDER BY u.day",
             [dn, *args],
         )
@@ -480,26 +484,26 @@ class Console:
             "SELECT u.key_id, k.alias, k.owner, k.status, k.last_used_at, SUM(u.weighted) AS weighted, "
             "SUM(u.requests) AS requests, SUM(u.errors) AS errors, SUM(u.input_tokens) AS input_tokens, "
             "SUM(u.cached_tokens) AS cached_tokens, SUM(u.output_tokens) AS output_tokens "
-            f"FROM usage_daily u LEFT JOIN api_keys k ON k.id = u.key_id WHERE u.day >= ? AND {ucond} "
+            f"FROM usage_all u LEFT JOIN api_keys k ON k.id = u.key_id WHERE u.day >= ? AND {ucond} "
             "GROUP BY u.key_id ORDER BY weighted DESC",
             [d7, *args],
         )
         by_owner = self.db.all(
             "SELECT COALESCE(NULLIF(k.owner, ''), '（未填写）') AS owner, COUNT(DISTINCT u.key_id) AS keys, "
             "SUM(u.weighted) AS weighted, SUM(u.requests) AS requests "
-            f"FROM usage_daily u LEFT JOIN api_keys k ON k.id = u.key_id WHERE u.day >= ? AND {ucond} "
+            f"FROM usage_all u LEFT JOIN api_keys k ON k.id = u.key_id WHERE u.day >= ? AND {ucond} "
             "GROUP BY 1 ORDER BY weighted DESC",
             [d7, *args],
         )
         by_model = self.db.all(
             "SELECT model, SUM(requests) AS requests, SUM(weighted) AS weighted "
-            f"FROM usage_daily WHERE day >= ? AND {cond} GROUP BY model ORDER BY weighted DESC",
+            f"FROM usage_all WHERE day >= ? AND {cond} GROUP BY model ORDER BY weighted DESC",
             [d7, *args],
         )
         # Chart colours follow the key, so they are assigned from a window that
         # does not move with the range filter.
         top_keys = [r["key_id"] for r in self.db.all(
-            f"SELECT key_id FROM usage_daily WHERE day >= ? AND {cond} GROUP BY key_id "
+            f"SELECT key_id FROM usage_all WHERE day >= ? AND {cond} GROUP BY key_id "
             "ORDER BY SUM(weighted) DESC LIMIT 5",
             [d30, *args],
         )]
@@ -529,7 +533,15 @@ class Console:
             "active_24h": active_24h,
             "recent_errors": recent_errors,
             "upstream_ok": self._upstream_cache.get("health", (0, None))[1],
+            "history": self._history_info(),
         }
+
+    def _history_info(self) -> dict | None:
+        raw = self.db.settings().get("history_import")
+        try:
+            return json.loads(raw) if raw else None
+        except ValueError:
+            return None
 
     def _request_scope(self, p: Principal) -> tuple[str, list]:
         if p.can("audit.view_all"):
@@ -582,7 +594,7 @@ class Console:
             "SUM(CASE WHEN day >= ? THEN errors ELSE 0 END) AS errors_7d, "
             "SUM(weighted) AS weighted_30d, SUM(requests) AS requests_30d, "
             "SUM(input_tokens) AS input_30d, SUM(cached_tokens) AS cached_30d, SUM(output_tokens) AS output_30d "
-            f"FROM usage_daily WHERE day >= ? {extra} GROUP BY key_id",
+            f"FROM usage_all WHERE day >= ? {extra} GROUP BY key_id",
             [today, today, d7, d7, d7, d30, *args],
         )
         return {r.pop("key_id"): r for r in rows}
@@ -659,7 +671,7 @@ class Console:
         daily = self.db.all(
             "SELECT day, SUM(requests) AS requests, SUM(errors) AS errors, SUM(input_tokens) AS input_tokens, "
             "SUM(cached_tokens) AS cached_tokens, SUM(output_tokens) AS output_tokens, SUM(weighted) AS weighted "
-            "FROM usage_daily WHERE key_id = ? AND day >= ? GROUP BY day ORDER BY day",
+            "FROM usage_all WHERE key_id = ? AND day >= ? GROUP BY day ORDER BY day",
             (key_id, since),
         )
         off = tz * 60_000
@@ -672,7 +684,7 @@ class Console:
         models = self.db.all(
             "SELECT model, SUM(requests) AS requests, SUM(weighted) AS weighted, SUM(input_tokens) AS input_tokens, "
             "SUM(cached_tokens) AS cached_tokens, SUM(output_tokens) AS output_tokens "
-            "FROM usage_daily WHERE key_id = ? AND day >= ? GROUP BY model ORDER BY weighted DESC",
+            "FROM usage_all WHERE key_id = ? AND day >= ? GROUP BY model ORDER BY weighted DESC",
             (key_id, since),
         )
         ips = self.db.all(
@@ -704,6 +716,7 @@ class Console:
             "ttfb_p95": pct(0.95),
             "inflight": inflight,
             "tz_offset_minutes": tz,
+            "history": self._history_info(),
         }
 
     async def update_key(self, request):

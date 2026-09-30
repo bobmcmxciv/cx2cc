@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added usage history to the gateway: `tools/import_cx2cc_logs.py` rebuilds daily usage from cx2cc and codex-bridge logs (dates reconstructed backwards from each file's modification time, models joined through the conversation key), `import-history` loads it into a separate `usage_history` table that re-imports replace, and every report reads live and imported data through the `usage_all` view. The console says which days are imported, and key pages can show 90 days. Console asset URLs now carry a version so a deploy reaches browsers immediately.
+
 - Added cx2cc-gateway (`gateway/`), an optional multi-user front door: personal API keys stored as hashes and shown once, with aliases, owners, scopes (`chat`, `images`, `usage`, `accounts`), per-key model allowlists that follow cx2cc's aliases, requests-per-minute / concurrency / daily / 7-day weighted-token limits, expiry, rotation with a grace period and revocation. The caller's key is swapped for the single internal token cx2cc accepts; streams are forwarded unbuffered while usage is read from the final frames of all three dialects; every call gets an audit row (never the prompt or completion) and an `X-Cx2cc-Request-Id`. Keys without the `accounts` scope see `/usage` without subscription e-mail and account ids. A web console under `/admin/` (admin / operator / auditor roles, key-holder self-service, CSV export, admin event log) manages it. aiohttp service with its own tests and Docker image.
 - Added the project page (`site/index.html`).
 - Added `POST /v1/responses` (alias `/openai/v1/responses`), a byte-level Responses passthrough for Codex CLI 0.135+, and `POST /v1/alpha/search` for Codex CLI 0.158+ standalone web search.

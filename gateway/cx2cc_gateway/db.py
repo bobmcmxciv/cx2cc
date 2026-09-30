@@ -96,6 +96,30 @@ CREATE TABLE IF NOT EXISTS usage_daily (
   PRIMARY KEY (day, key_id, model)
 );
 
+-- Usage from before the gateway existed (e.g. rebuilt from cx2cc logs): daily
+-- aggregates only, replaced wholesale per source on re-import.
+CREATE TABLE IF NOT EXISTS usage_history (
+  source        TEXT NOT NULL,
+  day           TEXT NOT NULL,
+  key_id        INTEGER NOT NULL,
+  model         TEXT NOT NULL,
+  requests      INTEGER NOT NULL DEFAULT 0,
+  errors        INTEGER NOT NULL DEFAULT 0,
+  input_tokens  INTEGER NOT NULL DEFAULT 0,
+  cached_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  weighted      INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (source, day, key_id, model)
+);
+
+-- Every report reads this: live rollups plus imported history.
+CREATE VIEW IF NOT EXISTS usage_all AS
+  SELECT day, key_id, model, requests, errors, input_tokens, cached_tokens, output_tokens, weighted
+    FROM usage_daily
+  UNION ALL
+  SELECT day, key_id, model, requests, errors, input_tokens, cached_tokens, output_tokens, weighted
+    FROM usage_history;
+
 CREATE TABLE IF NOT EXISTS audit_events (
   id          INTEGER PRIMARY KEY,
   ts          INTEGER NOT NULL,
@@ -286,6 +310,37 @@ class Database:
         except Exception:
             c.execute("ROLLBACK")
             raise
+
+    def replace_history(self, source: str, key_id: int, rows: list[dict],
+                        weights: tuple[float, float, float]) -> dict:
+        """Replace every usage_history row of `source` with `rows`
+        ({day, model, requests, errors, input_tokens, cached_tokens,
+        output_tokens}); weighted tokens use the current weights."""
+        w_uncached, w_cached, w_output = weights
+        merged: dict[tuple[str, str], list[int]] = {}
+        for r in rows:
+            k = (str(r["day"]), str(r.get("model") or "-")[:80])
+            acc = merged.setdefault(k, [0, 0, 0, 0, 0])
+            for i, f in enumerate(("requests", "errors", "input_tokens", "cached_tokens", "output_tokens")):
+                acc[i] += int(r.get(f) or 0)
+        c = self.conn()
+        c.execute("BEGIN")
+        try:
+            c.execute("DELETE FROM usage_history WHERE source = ?", (source,))
+            for (day, model), (req, err, inp, cached, out) in merged.items():
+                weighted = int(round((inp - cached) * w_uncached + cached * w_cached + out * w_output))
+                c.execute(
+                    "INSERT INTO usage_history (source, day, key_id, model, requests, errors, input_tokens, "
+                    "cached_tokens, output_tokens, weighted) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (source, day, key_id, model, req, err, inp, cached, out, weighted),
+                )
+            c.execute("COMMIT")
+        except Exception:
+            c.execute("ROLLBACK")
+            raise
+        days = sorted({d for d, _ in merged})
+        return {"rows": len(merged), "first_day": days[0] if days else None,
+                "last_day": days[-1] if days else None}
 
     def purge(self, retention_days: int) -> int:
         cutoff = now_ms() - retention_days * 86_400_000

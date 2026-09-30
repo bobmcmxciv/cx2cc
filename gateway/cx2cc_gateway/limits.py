@@ -1,7 +1,7 @@
 """Per-key request rate, concurrency and weighted-token quotas.
 
 All state lives in the event loop thread, so no locking is needed. Quota
-totals are reloaded from usage_daily periodically and advanced in between as
+totals are reloaded from usage_all periodically and advanced in between as
 requests finish; they are soft limits (a request that starts under the limit
 is allowed to finish over it).
 """
@@ -61,7 +61,7 @@ class Limiter:
         week_start = day_of(day_start_ms(-6, tz_offset_minutes), tz_offset_minutes)
         rows = db.all(
             "SELECT key_id, SUM(CASE WHEN day = ? THEN weighted ELSE 0 END) AS today, "
-            "SUM(weighted) AS week FROM usage_daily WHERE day >= ? GROUP BY key_id",
+            "SUM(weighted) AS week FROM usage_all WHERE day >= ? GROUP BY key_id",
             (today, week_start),
         )
         self._today = {r["key_id"]: int(r["today"] or 0) for r in rows}

@@ -19,6 +19,7 @@ async def test_console_requires_login_and_serves_ui(gw):
     assert r.status == 401
     r = await gw.client.get("/admin/")
     assert r.status == 200 and "text/html" in r.headers["Content-Type"]
+    assert "static/app.js?v=" in await r.text()
     assert "frame-ancestors 'none'" in r.headers["Content-Security-Policy"]
     r = await gw.client.get("/admin/static/app.js")
     assert r.status == 200 and r.headers["Content-Type"].startswith("text/javascript")
@@ -273,3 +274,28 @@ async def test_upstream_view_strips_local_paths(gw):
     [acct] = data["accounts"]["accounts"]
     assert acct["id"] == "pro-1" and "path" not in acct
     assert data["catalog"]["aliases"] == {"gpt-6-sol": "gpt-6.1-sol"}
+
+
+async def test_imported_history_shows_in_reports_and_reimport_replaces(gw):
+    from cx2cc_gateway.db import day_of, now_ms as _now
+
+    kid = gw.add_key("legacy-shared", KEY)
+    gw.add_user("root", "admin")
+    today = day_of(_now(), gw.rt.settings.tz_offset_minutes)
+    rows = [{"day": today, "model": "gpt-6.1-sol", "requests": 3, "errors": 1,
+             "input_tokens": 1000, "cached_tokens": 800, "output_tokens": 10}]
+    info = gw.db.replace_history("cx2cc-logs", kid, rows, (1, 0.1, 8))
+    assert info == {"rows": 1, "first_day": today, "last_day": today}
+    gw.db.replace_history("cx2cc-logs", kid, rows, (1, 0.1, 8))  # idempotent
+    gw.db.set_setting("history_import", '{"key": "legacy-shared", "first_day": "%s"}' % today)
+    await login(gw.client, "root")
+    ov = await (await gw.client.get("/admin/api/overview")).json()
+    assert ov["totals"]["today"]["requests"] == 3
+    assert ov["totals"]["today"]["weighted"] == 200 + 80 + 80
+    assert ov["history"]["key"] == "legacy-shared"
+    detail = await (await gw.client.get(f"/admin/api/keys/{kid}")).json()
+    assert detail["daily"][0]["requests"] == 3 and detail["history"]["first_day"] == today
+    await gw.client.post("/api/v1/messages", headers={"x-api-key": KEY}, json={"stream": True, "messages": []})
+    gw.rt.recorder.flush()
+    ov = await (await gw.client.get("/admin/api/overview")).json()
+    assert ov["totals"]["today"]["requests"] == 4

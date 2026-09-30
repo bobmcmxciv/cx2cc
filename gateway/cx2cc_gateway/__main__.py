@@ -7,11 +7,14 @@
     python -m cx2cc_gateway import-key --alias legacy-shared --scopes chat,images,usage,accounts
                                                                            (existing secret from stdin)
     python -m cx2cc_gateway list-keys
+    python -m cx2cc_gateway import-history --key legacy-shared --source cx2cc-logs < history.json
+                                                                           (daily rows, see tools/)
 """
 from __future__ import annotations
 
 import argparse
 import getpass
+import json
 import sys
 
 from . import config
@@ -70,6 +73,9 @@ def main(argv: list[str] | None = None) -> int:
         k.add_argument("--note", default="")
         k.add_argument("--scopes", default=",".join(DEFAULT_SCOPES))
     sub.add_parser("list-keys")
+    ih = sub.add_parser("import-history")
+    ih.add_argument("--key", required=True, help="alias the history is attributed to")
+    ih.add_argument("--source", required=True, help="replaces earlier imports with the same name")
     args = parser.parse_args(argv)
 
     cfg = config.load()
@@ -122,6 +128,28 @@ def main(argv: list[str] | None = None) -> int:
             print(secret)
         else:
             print(f"imported {args.alias} (id {kid}, prefix {key_display_prefix(secret)})")
+    elif args.cmd == "import-history":
+        from .runtime import Settings
+
+        key = db.one("SELECT id FROM api_keys WHERE alias = ?", (args.key,))
+        if not key:
+            raise SystemExit(f"no key {args.key}")
+        payload = json.load(sys.stdin)
+        rows = payload["rows"] if isinstance(payload, dict) else payload
+        meta = payload.get("meta", {}) if isinstance(payload, dict) else {}
+        s = Settings.from_db(db.settings())
+        info = db.replace_history(args.source, key["id"], rows, (s.w_uncached, s.w_cached, s.w_output))
+        info.update({"source": args.source, "key": args.key, "imported_at": now_ms(), **meta})
+        db.set_setting("history_import", json.dumps(info, ensure_ascii=False))
+        db.event("usage.import_history", actor_type="cli", actor_name="cli", target_type="key",
+                 target_id=key["id"], target_name=args.key,
+                 detail={k: info.get(k) for k in ("source", "rows", "first_day", "last_day")})
+        totals = db.one(
+            "SELECT SUM(requests) AS requests, SUM(input_tokens) AS input_tokens, SUM(cached_tokens) AS cached, "
+            "SUM(output_tokens) AS output_tokens, SUM(weighted) AS weighted FROM usage_history WHERE source = ?",
+            (args.source,),
+        )
+        print(json.dumps({**info, "totals": totals}, ensure_ascii=False))
     elif args.cmd == "list-keys":
         for r in db.all("SELECT id, alias, owner, status, key_prefix, scopes, last_used_at FROM api_keys ORDER BY id"):
             print(f"{r['id']:>4}  {r['alias']:<24} {r['status']:<9} {r['key_prefix']:<16} "
