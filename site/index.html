@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>cx2cc — 用 ChatGPT 订阅驱动 Claude Code 与 Codex</title>
+<style>
+  :root{
+    --bg:#fbfbfa; --fg:#1f1e1c; --muted:#6b6862; --line:#e4e1db;
+    --card:#fff; --accent:#b34a1c; --accent-soft:#faf2ed; --code:#f4f2ee;
+    --blue:#2a78d6; --blue-soft:#eef4fc;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{ --bg:#181715; --fg:#eceae5; --muted:#a09c94; --line:#312f2b;
+           --card:#201f1c; --accent:#e5763f; --accent-soft:#2a211c; --code:#252320;
+           --blue:#6da7ec; --blue-soft:#1b2433; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:16px/1.75 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    -webkit-font-smoothing:antialiased}
+  .wrap{max-width:900px;margin:0 auto;padding:56px 24px 88px}
+  header{margin-bottom:28px}
+  h1{font-size:34px;line-height:1.25;margin:0 0 14px;letter-spacing:-.015em}
+  .sub{color:var(--muted);font-size:17.5px;margin:0 0 22px}
+  h2{font-size:22px;margin:56px 0 16px;letter-spacing:-.01em;padding-top:8px;border-top:1px solid var(--line)}
+  h3{font-size:17px;margin:28px 0 10px}
+  p{margin:0 0 14px}
+  a{color:var(--accent)}
+  code{background:var(--code);padding:.12em .4em;border-radius:4px;
+    font:13.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  pre{background:var(--code);padding:14px 16px;border-radius:8px;overflow-x:auto;margin:0 0 16px}
+  pre code{background:none;padding:0;font-size:13px;line-height:1.65}
+  .cta{display:flex;flex-wrap:wrap;gap:10px}
+  .btn{display:inline-block;padding:9px 18px;border-radius:8px;border:1px solid var(--line);
+    background:var(--card);color:var(--fg);text-decoration:none;font-size:15px}
+  .btn:hover{border-color:var(--accent)}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  nav.toc{margin:28px 0 0;font-size:14.5px;color:var(--muted)}
+  nav.toc a{color:var(--muted);margin-right:14px;text-decoration:none;white-space:nowrap}
+  nav.toc a:hover{color:var(--accent)}
+
+  .note{background:var(--accent-soft);border-left:3px solid var(--accent);
+    padding:14px 16px;border-radius:0 8px 8px 0;margin:18px 0}
+  .note strong{color:var(--accent)}
+
+  /* chain diagram */
+  .chain{margin:6px 0 10px}
+  .tier{border:1px solid var(--line);background:var(--card);border-radius:10px;padding:14px 18px}
+  .tier .name{font-weight:650}
+  .tier .where{color:var(--muted);font-size:13.5px;margin-left:8px}
+  .tier .what{color:var(--muted);font-size:14.5px;margin-top:4px;line-height:1.6}
+  .tier.edge{border-color:var(--accent)}
+  .hop{color:var(--muted);font-size:13px;padding:6px 0 6px 26px;position:relative}
+  .hop::before{content:"";position:absolute;left:12px;top:0;bottom:0;border-left:2px solid var(--line)}
+
+  /* feature grid */
+  .features{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin:0 0 8px}
+  .feat{border:1px solid var(--line);background:var(--card);border-radius:10px;padding:14px 16px}
+  .feat b{display:block;margin-bottom:4px;font-size:15.5px}
+  .feat span{color:var(--muted);font-size:14.5px;line-height:1.65;display:block}
+
+  table{border-collapse:collapse;width:100%;margin:0 0 16px;font-size:14.5px}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--muted);font-weight:600;font-size:13px}
+  td code{font-size:12.5px;white-space:nowrap}
+  .scroll{overflow-x:auto}
+  .hash{font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    color:var(--muted);word-break:break-all}
+  footer{margin-top:64px;padding-top:20px;border-top:1px solid var(--line);
+    color:var(--muted);font-size:14px}
+  ul{padding-left:22px;margin:0 0 14px}
+  li{margin-bottom:6px}
+  @media (max-width:640px){ h1{font-size:28px} .wrap{padding-top:36px} }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>cx2cc</h1>
+  <p class="sub">把 ChatGPT 订阅里的 Codex 模型包装成 Anthropic 与 OpenAI 两种协议的 API。
+  Claude Code、Codex CLI、cc-switch、Chatbox、OpenAI SDK 都能直接接入；
+  公网入口按个人 API Key 鉴权与限额，每一次调用都有审计记录。</p>
+  <div class="cta">
+    <a class="btn primary" href="/admin/">进入管理控制台</a>
+    <a class="btn" href="/admin/#/key-login">用我的 Key 查看用量</a>
+    <a class="btn" href="https://github.com/bobmcmxciv/cx2cc">源代码</a>
+  </div>
+  <nav class="toc">
+    <a href="#quickstart">接入</a><a href="#arch">架构</a><a href="#gateway">公网入口与网关</a>
+    <a href="#cx2cc">cx2cc</a><a href="#bridge">codex-bridge</a><a href="#api">接口</a>
+    <a href="#keys">Key 与权限</a><a href="#errors">排查</a><a href="#connect">cx2cc-connect</a>
+  </nav>
+</header>
+
+<h2 id="quickstart">接入</h2>
+<p>每位使用者向管理员申请一把个人 API Key（形如 <code>sk-cx2cc-…</code>），
+所有客户端都用这一把。入口地址：</p>
+<pre><code>https://cx2cc.bobmcmxciv.xin/api          Anthropic 协议（Claude Code）
+https://cx2cc.bobmcmxciv.xin/api/v1       OpenAI 协议（Codex CLI、SDK、Chatbox）</code></pre>
+
+<h3>Claude Code</h3>
+<p>写进 <code>~/.claude/settings.json</code> 的 <code>env</code>。这个文件的优先级高于终端里的环境变量；
+以前配过 <code>ANTHROPIC_API_KEY</code> 的请删掉，它会盖过下面的 Token。</p>
+<pre><code>{
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://cx2cc.bobmcmxciv.xin/api",
+    "ANTHROPIC_AUTH_TOKEN": "sk-cx2cc-你的Key",
+    "ANTHROPIC_MODEL": "gpt-6.1-sol"
+  }
+}</code></pre>
+<p><code>ANTHROPIC_MODEL</code> 可以不写：Claude Code 自带的 opus / sonnet / haiku 名称都会落到服务端的默认模型。
+可选模型见 <code>GET /api/v1/models</code>。改完重启 Claude Code 才生效。</p>
+
+<h3>Codex CLI</h3>
+<p><code>~/.codex/config.toml</code>。Key 放在 <code>http_headers</code> 里，新版 Codex 不会从
+<code>auth.json</code> 回填第三方供应商的 Key。</p>
+<pre><code>model = "gpt-6.1-sol"
+model_provider = "cx2cc"
+
+[model_providers.cx2cc]
+name = "cx2cc"
+base_url = "https://cx2cc.bobmcmxciv.xin/api/v1"
+wire_api = "responses"
+
+[model_providers.cx2cc.http_headers]
+Authorization = "Bearer sk-cx2cc-你的Key"</code></pre>
+<p>Codex 的网页搜索（包括 0.158 起的独立搜索）直接可用；要实时联网，在顶层加 <code>web_search = "live"</code>。</p>
+
+<h3>OpenAI 协议客户端</h3>
+<p>OpenAI SDK、Chatbox 以及其他支持自定义 OpenAI 地址的工具：Base URL 填
+<code>https://cx2cc.bobmcmxciv.xin/api/v1</code>，API Key 填个人 Key，模型名从
+<code>/api/v1/models</code> 里选。入口处理了跨域预检，Chatbox 网页版和手机端也能直接用。</p>
+
+<h3>cc-switch 与出图</h3>
+<ul>
+  <li>cc-switch 的用量查询：自定义脚本请求 <code>{{baseUrl}}/usage</code>，请求头
+    <code>x-api-key: {{apiKey}}</code>，就能在供应商卡片上看到订阅的剩余额度。</li>
+  <li><code>gpt-image</code> 出图 skill 复用 Claude Code 已有的 <code>ANTHROPIC_BASE_URL</code> 和
+    <code>ANTHROPIC_AUTH_TOKEN</code>，调用 <code>/v1/images/generations</code> 与 <code>/v1/images/edits</code>。</li>
+  <li>Key 需要有对应的权限范围：出图要「图片」，用量查询要「额度」。</li>
+</ul>
+
+<h2 id="arch">架构</h2>
+<p>请求从客户端出发，依次经过网关、cx2cc、codex-bridge 到达 Codex 后端。只有网关对公网开放，cx2cc 与 codex-bridge 只认内部凭据。</p>
+<div class="chain">
+  <div class="tier edge">
+    <div><span class="name">客户端</span><span class="where">Claude Code · Codex CLI · cc-switch · Chatbox · OpenAI SDK · HAPI</span></div>
+  </div>
+  <div class="hop">HTTPS · cx2cc.bobmcmxciv.xin/api · 个人 API Key</div>
+  <div class="tier edge">
+    <div><span class="name">cx2cc-gateway</span><span class="where">公网入口，阿里云上海</span></div>
+    <div class="what">核验个人 Key，检查权限范围、模型白名单、限流与额度，换成内部凭据转发；
+      流式响应边转发边读取用量，逐次写入审计；同时提供管理控制台。</div>
+  </div>
+  <div class="hop">内部凭据 · frp QUIC 隧道</div>
+  <div class="tier">
+    <div><span class="name">cx2cc</span><span class="where">协议转换层，海外节点</span></div>
+    <div class="what">Anthropic Messages 与 OpenAI Chat 之间双向转换；Responses、出图、搜索原样透传；
+      模型别名解析、会话级缓存亲和、网页搜索映射。</div>
+  </div>
+  <div class="hop">OpenAI Chat Completions / Responses · 本机回环</div>
+  <div class="tier">
+    <div><span class="name">codex-bridge</span><span class="where">上游适配层，与 cx2cc 同机</span></div>
+    <div class="what">用 ChatGPT 登录凭据调用 Codex 后端；多个订阅组成账号池，额度用完自动换号；
+      维护模型目录，提供额度与账号池查询。</div>
+  </div>
+  <div class="hop">ChatGPT OAuth</div>
+  <div class="tier">
+    <div><span class="name">ChatGPT Codex 后端</span><span class="where">GPT-6 系列模型 · gpt-image-2 · 网页搜索</span></div>
+  </div>
+</div>
+
+<h2 id="gateway">公网入口与网关</h2>
+<p>cx2cc-gateway 只管「谁在用、用了多少、能不能用」，不改动请求内容。
+它核验个人 Key 之后换成内部凭据转发，后面的 cx2cc 与 codex-bridge 不需要知道有多少使用者。</p>
+<div class="features">
+  <div class="feat"><b>每人一把 Key</b><span>按别名和使用人管理。明文只在创建或轮换时显示一次，服务端只保存哈希。</span></div>
+  <div class="feat"><b>权限范围</b><span>对话、图片、额度查询、账号池四类，逐把勾选。账号池含订阅邮箱，只授予管理员指定的 Key；普通 Key 查额度时，返回里的邮箱和账号 ID 会被去掉。</span></div>
+  <div class="feat"><b>模型白名单</b><span>可限定一把 Key 能用的模型。请求名和别名解析后的实际模型任一命中即放行，不写模型时按默认模型判断。</span></div>
+  <div class="feat"><b>限流与额度</b><span>每分钟请求数、并发数、每日加权额度、近 7 日加权额度。超出时返回 429 并附 <code>Retry-After</code>。</span></div>
+  <div class="feat"><b>Key 生命周期</b><span>设置有效期；随时停用、启用；轮换时旧值可保留 0–168 小时宽限；吊销后立即失效且不可恢复。</span></div>
+  <div class="feat"><b>逐次调用审计</b><span>时间、Key、来源 IP、客户端、路由、请求模型与实际模型、输入 / 缓存 / 输出 token、加权用量、首字节与总耗时、会话 ID、失败原因。提示词与回复内容不落盘。</span></div>
+  <div class="feat"><b>操作日志</b><span>登录与登录失败、Key 的创建 / 修改 / 停用 / 轮换 / 吊销、账号与设置变更、审计导出，全部记下操作人和 IP。</span></div>
+  <div class="feat"><b>管理控制台</b><span>用量概览、按 Key / 使用人 / 模型汇总、每日与每小时趋势、调用查询与 CSV 导出、上游模型目录与账号池状态。</span></div>
+  <div class="feat"><b>角色分权</b><span>管理员；Key 管理员可以创建 Key，只看得到、管得了自己创建的那些；审计员只读全部记录。持 Key 的人可以用自己的 Key 登录，只看这一把的用量。</span></div>
+  <div class="feat"><b>流式透传</b><span>SSE 逐块转发，不攒包；上游中途断流时补发一条错误事件，客户端能看到原因并重试。每个响应带 <code>X-Cx2cc-Request-Id</code>，可凭它查到对应的审计记录。</span></div>
+  <div class="feat"><b>加权用量口径</b><span>(输入 − 缓存) × 1 + 缓存 × 0.1 + 输出 × 8，与订阅额度的计量方式一致，限额和排行都按它算，权重可在设置里调整。</span></div>
+  <div class="feat"><b>浏览器客户端</b><span>入口统一处理 CORS 预检，网页和 WebView 形态的客户端不需要额外代理。长推理最长允许 15 分钟无输出，请求体上限 64 MB。</span></div>
+</div>
+
+<h2 id="cx2cc">cx2cc：协议转换层</h2>
+<p>cx2cc 让只会说 Anthropic 协议的 Claude Code 用上 OpenAI 协议的模型，同时给 OpenAI 协议的客户端开一条原样透传的路。</p>
+<div class="features">
+  <div class="feat"><b>Anthropic Messages 兼容</b><span>system、文本、图片、工具定义、<code>tool_use</code> / <code>tool_result</code>、<code>tool_choice</code>、停止序列，流式与非流式事件完整转换，覆盖 Claude Code 的日常流程。</span></div>
+  <div class="feat"><b>网页搜索</b><span>Claude Code 的 WebSearch 映射到上游原生的 web_search，返回带链接与标题的搜索结果块；<code>allowed_domains</code> 转成上游的域名过滤。</span></div>
+  <div class="feat"><b>OpenAI 协议透传</b><span>Chat Completions、Responses（Codex CLI）、独立搜索（Codex 0.158+）、图片生成与参考图编辑（最多 16 张）原样转发，共用同一套上游与缓存策略。</span></div>
+  <div class="feat"><b>模型解析</b><span>去掉 <code>[1m]</code> 之类的窗口后缀，按别名表改写；Claude 自带的模型名落到默认模型；不认识的模型名直接返回 400，不会悄悄换成别的模型。<code>/v1/models</code> 标出每个名字实际由哪个模型服务。</span></div>
+  <div class="feat"><b>如实上报模型</b><span>响应里写的是实际服务请求的模型，而不是回显客户端请求的名字，用量统计不会被 claude-opus 之类的名字带偏。</span></div>
+  <div class="feat"><b>会话级缓存亲和</b><span>按会话生成稳定的 <code>prompt_cache_key</code>，同一会话各轮落在同一缓存节点，逐轮命中率在真实会话上从约 13% 提到约 99%；缓存读取量作为 <code>cache_read_input_tokens</code> 回报。</span></div>
+  <div class="feat"><b>上下文用量估算</b><span>流式开始时，按本会话已测得的 token 与字符比例估算提示词大小，每轮用真实值校准。Claude Code 的上下文用量条因此有数，不再显示 0%。</span></div>
+  <div class="feat"><b>回复风格约定</b><span>在 system prompt 末尾追加一段写作约定：先说结论、成段叙述、不给每个工具调用配旁白。只追加不前置，前缀缓存不受影响；可关闭或替换成自己的文本。</span></div>
+  <div class="feat"><b>额度与账号池透传</b><span><code>/usage</code> 供 cc-switch 和 HAPI 显示订阅余量，<code>/accounts</code> 显示账号池里谁在服务、谁在冷却。</span></div>
+  <div class="feat"><b>断流与缓存诊断</b><span>上游中途断开时给客户端发明确的错误事件；每个请求记录会话 key、工具数与分段内容哈希，命中率下降时能分清是提示词变了还是上游丢了缓存。</span></div>
+  <div class="feat"><b>多平台发布</b><span>Windows EXE（带图形启动器）、macOS arm64 与 x86_64 原生包、源码运行；发布流水线带冒烟测试、文件白名单、SHA-256 校验和全历史密钥扫描。</span></div>
+</div>
+
+<h2 id="bridge">codex-bridge：上游适配与账号池</h2>
+<p>Codex 后端只接受 ChatGPT 登录凭据和 Responses 协议。codex-bridge 把这一层包起来，让上面的 cx2cc 像调用普通 OpenAI 兼容接口一样调用它。</p>
+<div class="features">
+  <div class="feat"><b>ChatGPT 登录直连</b><span>使用 Codex CLI 的 ChatGPT OAuth 凭据，不需要 OpenAI API Key；访问令牌过期前约 5 分钟自动刷新并写回。</span></div>
+  <div class="feat"><b>协议适配</b><span>Chat Completions 转 Codex Responses，工具调用、图片输入、推理强度和流式输出都支持；Responses 请求原样转发。</span></div>
+  <div class="feat"><b>多订阅账号池</b><span>按优先级使用多个订阅。某个账号本周额度用完，当前请求自动换下一个账号重放，客户端察觉不到；限流与凭据异常分别短时冷却，窗口重置后自动回到高优先级账号。</span></div>
+  <div class="feat"><b>账号状态自检</b><span>冷却状态在重启后保留，调整账号顺序、解除冷却都不用重启。查询额度时顺带校正：窗口已重置的提前放回，已触顶的提前停用；免费套餐的账号自动跳过。</span></div>
+  <div class="feat"><b>账号管理工具</b><span>导入、分离、排序、手动停用与恢复、备份与还原；登录新账号前先分离，避免 <code>codex login</code> 吊销正在服务的会话。同一文件换了账号会被识别出来，不会悄悄换人服务。</span></div>
+  <div class="feat"><b>模型目录</b><span>按本机 Codex CLI 的版本号向后端拉取可用模型、上下文窗口与推理强度，缓存一小时，拉取失败时沿用上一份。</span></div>
+  <div class="feat"><b>超长上下文兜底</b><span>后端拒绝超出窗口的提示词时，先换一个缓存亲和 key 重试，再切到长上下文模型，其他拒绝原样返回。</span></div>
+  <div class="feat"><b>出图与搜索</b><span>gpt-image-2 文生图与参考图编辑走同一订阅，一次最多 4 张；网页搜索支持域名过滤并带回来源链接。</span></div>
+  <div class="feat"><b>额度查询</b><span>直接读取订阅的周窗口用量、重置时间与额外额度，缓存 30 秒。</span></div>
+</div>
+
+<h2 id="api">接口</h2>
+<p>以下路径都挂在 <code>https://cx2cc.bobmcmxciv.xin/api</code> 下。Key 放在 <code>x-api-key</code> 或
+<code>Authorization: Bearer</code> 请求头里，两种写法等价。OpenAI 协议的接口另有 <code>/openai/v1/…</code> 别名。</p>
+<div class="scroll"><table>
+  <tr><th>接口</th><th>协议</th><th>用途</th><th>需要的权限范围</th></tr>
+  <tr><td><code>POST /v1/messages</code></td><td>Anthropic</td><td>Claude Code 主接口，流式与非流式</td><td>对话</td></tr>
+  <tr><td><code>POST /v1/chat/completions</code></td><td>OpenAI</td><td>Chat Completions</td><td>对话</td></tr>
+  <tr><td><code>POST /v1/responses</code></td><td>OpenAI</td><td>Responses，Codex CLI 使用</td><td>对话</td></tr>
+  <tr><td><code>POST /v1/alpha/search</code></td><td>OpenAI</td><td>Codex 独立网页搜索</td><td>对话</td></tr>
+  <tr><td><code>POST /v1/images/generations</code><br><code>POST /v1/images/edits</code></td><td>OpenAI</td><td>gpt-image-2 出图与参考图编辑</td><td>图片</td></tr>
+  <tr><td><code>GET /usage</code></td><td>JSON</td><td>订阅额度（cc-switch、HAPI）</td><td>额度</td></tr>
+  <tr><td><code>GET /accounts</code></td><td>JSON</td><td>账号池状态</td><td>账号池</td></tr>
+  <tr><td><code>GET /v1/models</code></td><td>OpenAI</td><td>模型目录、默认模型与别名</td><td>无需 Key</td></tr>
+  <tr><td><code>GET /health</code></td><td>JSON</td><td>健康检查</td><td>无需 Key</td></tr>
+</table></div>
+
+<h2 id="keys">Key 与权限</h2>
+<p>Key 由控制台账号创建。控制台有三种角色：</p>
+<div class="scroll"><table>
+  <tr><th>角色</th><th>能做什么</th></tr>
+  <tr><td>管理员</td><td>全部权限：管理所有 Key、授予账号池范围、管理控制台账号、修改计量设置、查看上游账号池</td></tr>
+  <tr><td>Key 管理员</td><td>创建 API Key；只看得到、管得了自己创建的 Key 及其审计记录</td></tr>
+  <tr><td>审计员</td><td>只读查看全部 Key、调用审计、操作日志与上游状态，不能创建或修改</td></tr>
+  <tr><td>Key 持有人</td><td>在控制台用自己的 Key 登录，只看这把 Key 的用量、调用记录和操作记录</td></tr>
+</table></div>
+<div class="note"><strong>一人一 Key。</strong>
+共用 Key 意味着分不清谁用了多少、泄露后只能全员一起换。每人（或每台机器）单独一把，
+用量和审计按 Key 汇总，停用或轮换只影响那一个人。</div>
+
+<h2 id="errors">常见错误</h2>
+<div class="scroll"><table>
+  <tr><th>状态码</th><th>含义</th><th>处理</th></tr>
+  <tr><td>401</td><td>没带 Key、Key 无效、已停用、已过期、已吊销，或是轮换前的旧值</td><td>检查客户端配置里的 Key；确认没有旧的 <code>ANTHROPIC_API_KEY</code> 盖过新值；找管理员确认 Key 状态</td></tr>
+  <tr><td>403</td><td>这把 Key 没有该接口的权限范围，或模型不在白名单里</td><td>换用允许的模型，或请管理员调整 Key 的权限</td></tr>
+  <tr><td>429</td><td>超出每分钟请求数、并发数、每日或近 7 日额度</td><td>按 <code>Retry-After</code> 等待；需要更高额度找管理员</td></tr>
+  <tr><td>400</td><td>请求了服务端不认识的模型名</td><td>从 <code>/api/v1/models</code> 里选模型名</td></tr>
+  <tr><td>502</td><td>入口连不上后面的 cx2cc</td><td>稍后重试；持续出现请联系管理员</td></tr>
+</table></div>
+<p>每个响应都带 <code>X-Cx2cc-Request-Id</code> 请求头。反馈问题时附上它，管理员能在调用审计里直接定位到那一次请求。</p>
+
+<h2 id="connect">cx2cc-connect（旧接入方式）</h2>
+<p>一键接入程序，通过 SSH 隧道（出站 22 端口）把本机 Claude Code 接到 cx2cc，不需要开放任何入站端口。
+它使用分发者提供的共享凭据，调用不按个人 Key 计量；新接入的机器请按上面的 HTTPS 方式配置。</p>
+<ul>
+  <li><a href="cx2cc-connect-windows.zip" download>Windows x64</a>（2.9 MB，解压后双击 <code>安装-install.bat</code>）</li>
+  <li><a href="cx2cc-connect-macos.zip" download>macOS</a>（5.4 MB，Apple 芯片与 Intel；右键 <code>双击安装.command</code> → 打开）</li>
+  <li><a href="README.md">说明文档</a> · <a href="AGENT-SETUP.md">给 AI 助手的安装手册</a> · <a href="SHA256SUMS.txt">校验文件</a></li>
+</ul>
+<p class="hash">
+  windows &nbsp;ea186ac0dce4b2a1082bd4166a5fbea1590cc37b56b0f4ad0e993e5faf36077c<br>
+  macos &nbsp;&nbsp;&nbsp;f40263dfa74f62bf86dc16bd8873245a1c9d6f63aad5563d421de99b97e22812
+</p>
+
+<footer>
+  API Key 等同于密码：不要贴进公开仓库、截图、群聊或网盘。怀疑泄露时请管理员立即轮换或吊销。<br>
+  源代码：<a href="https://github.com/bobmcmxciv/cx2cc">github.com/bobmcmxciv/cx2cc</a>
+</footer>
+
+</div>
+</body>
+</html>

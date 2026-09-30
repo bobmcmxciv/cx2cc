@@ -19,12 +19,21 @@ OpenAI-compatible upstream
 ## Features
 
 - `POST /v1/messages` compatibility shim
+- `POST /v1/chat/completions` (alias `POST /openai/v1/chat/completions`) OpenAI Chat Completions passthrough, for clients that already speak OpenAI natively
 - `GET /v1/models` compatibility shim
 - `GET /usage` passthrough of the upstream's quota/rate-limit JSON, for usage display in CC Switch
 - `GET /accounts` passthrough for upstreams that serve from a pool of subscriptions
+- `POST /v1/responses` (alias `POST /openai/v1/responses`) OpenAI Responses passthrough, for Codex CLI 0.135+ which only speaks Responses
+- `POST /v1/alpha/search` passthrough for Codex CLI 0.158+ standalone web search
+- `POST /v1/images/generations` and `POST /v1/images/edits` passthroughs (OpenAI Images shape, reference images as data URLs) for upstreams that expose gpt-image-2, used by the `gpt-image` Claude Code skill
+- Claude Code's WebSearch mapped onto the upstream's hosted `web_search` tool, with search results rebuilt as `server_tool_use` / `web_search_tool_result` blocks
+- Model resolution: `[1m]`-style window suffixes stripped, an alias table, a passthrough allowlist merged with the upstream catalog, and unknown models rejected instead of silently swapped; `/v1/models` says which model actually serves each name
 - Streaming Server-Sent Events translation
 - Text, image, tool use, and tool result translation for common Claude Code flows
 - Per-conversation `prompt_cache_key` so upstream automatic prompt caching keeps hitting across turns, with cache reads reported back to the client
+- An anchored prompt-size estimate in `message_start`, so Claude Code's context meter is not stuck at zero on OpenAI-style upstreams
+- Images returned inside tool results forwarded to the model as a follow-up user message
+- Optional multi-user gateway ([`gateway/`](gateway/README.md)): personal API keys, scopes, model allowlists, rate and quota limits, a per-call audit log and a web console
 - Optional fallback upstream API keys with finite retry
 - Native macOS arm64 / x86_64 packages and a LaunchAgent helper
 - Windows x64 EXE package, foreground, silent, and Startup-folder helper scripts
@@ -46,7 +55,7 @@ The supported target is the practical subset used by Claude Code / CC Switch aga
 
 Known limitations:
 
-- Only `/v1/messages`, `/v1/models`, `/usage`, `/accounts`, and `/health` are exposed.
+- Only `/v1/messages`, `/v1/chat/completions` (alias `/openai/v1/chat/completions`), `/v1/responses`, `/v1/alpha/search`, `/v1/images/generations` and `/v1/images/edits` (aliases under `/openai/v1/`), `/v1/models`, `/usage`, `/accounts`, and `/health` are exposed.
 - Batches, Files, token counting, server-side Anthropic tools, structured outputs, and native thinking blocks are not fully implemented.
 - Prompt caching relies on the upstream's automatic caching (see [Prompt caching](#prompt-caching)); Anthropic `cache_control` markers are ignored.
 - Streaming token usage depends on the upstream sending a usage chunk (`stream_options.include_usage` is requested automatically); if the upstream sends none, input tokens are reported as `0`.
@@ -66,6 +75,45 @@ Two accounting caveats, inherited from OpenAI usage semantics:
 - `cache_creation_input_tokens` is always `0`; OpenAI-style upstreams have no cache-write charge.
 
 Set `CX2CC_PROMPT_CACHE_KEY=off` if your upstream rejects unknown request fields.
+
+## Model resolution
+
+Every request's model name goes through the same steps before it reaches the upstream:
+
+1. A trailing window marker such as `[1m]` is stripped.
+2. `CX2CC_MODEL_ALIASES` (`from=to,from=to`) remaps the name, e.g. to move a whole fleet pinned to an old slug onto a new default without touching clients.
+3. The result is served if it is on the allowlist: `CX2CC_MODEL_PASSTHROUGH` plus whatever the upstream advertises on its own `/models` (cached for ten minutes).
+4. Claude Code's own names (`claude-*`, `opus`, `sonnet`, `haiku`, …) and requests without a model run on `CX2CC_UPSTREAM_MODEL`.
+5. Any other name is rejected with a 400 that lists what is available (`CX2CC_UNKNOWN_MODEL=reject`, the default); `CX2CC_UNKNOWN_MODEL=default` restores the old behaviour of quietly serving it with the default model.
+
+`GET /v1/models` mirrors the upstream catalog and annotates it with what this proxy does: `default_model`, `aliases`, `unknown_model_policy`, and a `served_as` field on every entry that is remapped. `?refresh=1` is forwarded so a client can force the upstream past its cache. With `CX2CC_REPORT_UPSTREAM_MODEL=true`, responses name the model that actually served the request.
+
+## Web search
+
+Claude Code's WebSearch sends Anthropic's hosted tool (`web_search_<date>`) as a forced side query. cx2cc maps it onto the upstream's hosted `web_search` tool (`allowed_domains` become the upstream `filters`; `blocked_domains` and `max_uses` have no counterpart) and rebuilds `server_tool_use` and `web_search_tool_result` blocks, plus `usage.server_tool_use`, from the upstream's search calls and `url_citation` annotations, streamed and non-streamed. Codex CLI's own search needs no mapping: `/v1/responses` and `/v1/alpha/search` are byte-level passthroughs.
+
+## OpenAI Chat Completions passthrough
+
+For clients that already speak the OpenAI dialect natively (SDKs, tools, other platforms) cx2cc exposes a passthrough entry point that shares the same upstream, key rotation, and prompt-cache-key discipline as the Anthropic path but does not translate the request or the response.
+
+```text
+OpenAI-format client
+        │ POST /v1/chat/completions   (or /openai/v1/chat/completions)
+        ▼
+http://127.0.0.1:8901
+        │ POST /chat/completions      (verbatim, plus model resolution / cache key)
+        ▼
+OpenAI-compatible upstream
+```
+
+- Endpoints: `POST /v1/chat/completions` (natural OpenAI base-URL layout) and the explicit alias `POST /openai/v1/chat/completions`; `GET /v1/models` and `GET /openai/v1/models` list the same catalog.
+- Authorization is the same as `/v1/messages`: either `x-api-key` or `Authorization: Bearer …`.
+- Errors follow the OpenAI shape (`{"error": {"message", "type", "code"}}`) rather than the Anthropic shape used on `/v1/messages`, so OpenAI SDKs surface them as normal API errors.
+- The request body is forwarded verbatim, with three additive tweaks: model resolution (same rules as `/v1/messages`, see [Model resolution](#model-resolution)), an auto-attached per-conversation `prompt_cache_key` when the client didn't send one (disable with `CX2CC_PROMPT_CACHE_KEY=off`), and `stream_options.include_usage` on streaming requests so token counts still come back.
+- Streaming responses are proxied byte-for-byte, so the client sees the upstream's own `chat.completion.chunk` events and `[DONE]` sentinel — no Anthropic-shape translation.
+- The `/v1/messages` response-style addendum (see below) is intentionally not injected here; OpenAI-format callers compose their own system prompt.
+
+Example: point any OpenAI SDK at `http://127.0.0.1:8901/v1` as its base URL, use the caller's cx2cc key as the API key, and request one of the slugs the upstream advertises on `/v1/models`.
 
 ## Response style injection
 
@@ -87,6 +135,18 @@ cx2cc appends a style addendum to the system prompt of every `/v1/messages` requ
 In CC Switch, enable usage query on the provider card with a custom script that requests `{{baseUrl}}/usage` with header `x-api-key: {{apiKey}}` and extracts whatever fields your upstream serves.
 
 `GET /accounts` (alias `GET /v1/accounts`) is the same kind of passthrough, for upstreams that multiplex several subscriptions and expose which one is currently serving. The query string is forwarded, so upstream filters such as `?usage=0` keep working through cx2cc. Upstreams without the endpoint answer 404, forwarded as-is.
+
+## Image generation endpoint
+
+`POST /v1/images/generations` (alias `/openai/v1/images/generations`) is a JSON passthrough in the OpenAI Images API shape: `{"prompt", "size", "quality", "background", "n"}` in, `{"data": [{"b64_json": ...}], "size", "quality", "usage", ...}` out. The body is forwarded to `<CX2CC_UPSTREAM_BASE_URL>/images/generations` with the caller's key and the upstream JSON comes back verbatim; codex-bridge serves it from the ChatGPT backend's gpt-image-2 endpoint on the subscription, so no third-party image relay or extra key is involved. The `gpt-image` Claude Code skill (`~/.claude/skills/gpt-image`) is the intended client: it reuses the `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` a machine already has for cx2cc. Timeout is 600 s because one image takes ~15 s upstream and `n` (max 4) is served sequentially.
+
+`POST /v1/images/edits` (alias `/openai/v1/images/edits`) is the image-to-image variant: same body plus `images`, a list of data-URL reference images (up to 16, order meaningful, ~1.5k input image_tokens each) that the bridge forwards to the backend's edits endpoint. A 1 MB PNG is ~1.4 MB of JSON, so the whole chain (NPM, frp, waitress) has to accept multi-megabyte bodies.
+
+## Multi-user gateway
+
+cx2cc authenticates nobody itself: it forwards the caller's key upstream. When one endpoint is shared by several people, put [cx2cc-gateway](gateway/README.md) in front of it. The gateway gives every person their own key (with an alias, owner, scopes, an optional model allowlist, rate / concurrency / daily / 7-day quota limits, expiry, rotation with a grace period, and revocation), swaps it for the single internal credential cx2cc accepts, streams the answer back unbuffered, and records one audit row per call (who, when, from where, which model, how many tokens, how long, what failed; never the prompt or the completion). A web console under `/admin/` has admin, operator (can create keys, sees only their own) and auditor roles, and lets key holders sign in with their own key to see their usage. It is a separate aiohttp service with its own tests and Docker image; cx2cc itself is unchanged.
+
+`site/index.html` is the project page served at the deployment's root.
 
 ## Requirements
 
@@ -304,7 +364,10 @@ The Windows scripts use their own location to find the release/source directory.
 | `CX2CC_UPSTREAM_BASE_URL` | Yes | none | OpenAI-compatible API base URL, e.g. `https://example.com/v1`. |
 | `CX2CC_UPSTREAM_API_KEY` | No | none | Fallback upstream key used when request `x-api-key` is absent. |
 | `CX2CC_UPSTREAM_API_KEYS` | No | none | Comma/newline separated fallback keys. Takes precedence over `CX2CC_UPSTREAM_API_KEY`. |
-| `CX2CC_UPSTREAM_MODEL` | No | `gpt-5.5` | Model name requested from the upstream for every request. |
+| `CX2CC_UPSTREAM_MODEL` | No | `gpt-5.5` | Default upstream model: used for Claude model names, requests without a model, and (with `CX2CC_UNKNOWN_MODEL=default`) unknown names. |
+| `CX2CC_MODEL_ALIASES` | No | none | `from=to,from=to` remaps applied after the window-suffix strip and before the allowlist. |
+| `CX2CC_MODEL_PASSTHROUGH` | No | none | Comma-separated model names clients may request directly, in addition to the upstream's `/models` list. |
+| `CX2CC_UNKNOWN_MODEL` | No | `reject` | `reject` answers unknown model names with a 400; `default` serves them with `CX2CC_UPSTREAM_MODEL`. |
 | `CX2CC_REPORT_UPSTREAM_MODEL` | No | off | When `1`/`true`/`yes`/`on`, responses name the model the upstream says it served instead of echoing the client's requested model. |
 | `CX2CC_PROMPT_CACHE_KEY` | No | on | Set `off` to stop sending the per-conversation `prompt_cache_key` upstream. |
 | `CX2CC_STYLE` | No | on | Set `off` to stop appending the response-style addendum to the system prompt. |
@@ -317,7 +380,15 @@ The Windows scripts use their own location to find the release/source directory.
 
 ```bash
 python -m pytest
-python -m compileall server.py translator.py start-cx2cc.py
+python -m compileall server.py translator.py prompt_estimate.py start-cx2cc.py
+```
+
+The gateway has its own dependencies and test suite:
+
+```bash
+cd gateway
+python -m pip install -r requirements-dev.txt
+python -m pytest
 ```
 
 Build the Windows EXE on Windows:

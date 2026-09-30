@@ -19,12 +19,21 @@ OpenAI-compatible upstream
 ## 功能特性
 
 - 兼容 `POST /v1/messages`
-- 兼容 `GET /v1/models`
+- 兼容 `GET /v1/models`，并标注每个模型名实际由哪个模型服务
+- `POST /v1/chat/completions`（别名 `/openai/v1/chat/completions`）：OpenAI Chat Completions 透传，给原生说 OpenAI 协议的客户端用
+- `POST /v1/responses`（别名 `/openai/v1/responses`）：OpenAI Responses 透传，Codex CLI 0.135 起只发 Responses
+- `POST /v1/alpha/search`：Codex CLI 0.158 起的独立网页搜索透传
+- `POST /v1/images/generations` 与 `POST /v1/images/edits`：OpenAI Images 形状的出图与参考图编辑透传（上游提供 gpt-image-2 时可用），`gpt-image` skill 用它
+- Claude Code 的 WebSearch 映射到上游原生 `web_search`，搜索结果还原成 `server_tool_use` / `web_search_tool_result` 块
+- 模型解析：去掉 `[1m]` 之类的窗口后缀、别名表、放行名单并入上游目录、未知模型直接拒绝而不是悄悄替换
 - `GET /usage` 透传上游的额度/限额 JSON，供 CC Switch 展示用量
 - `GET /accounts` 透传上游的账号池视图，适用于上游用多个订阅轮换的场景
 - 支持流式 SSE 事件转换
 - 支持 Claude Code 常见流程里的文本、图片、工具调用和工具结果转换
 - 按会话生成稳定的 `prompt_cache_key`，让上游自动 prompt 缓存跨轮持续命中，并把缓存读取量回报给客户端
+- `message_start` 里带锚定式的提示词大小估算，Claude Code 的上下文用量条不再停在 0
+- 工具结果里返回的图片，作为下一条 user 消息转给模型
+- 可选的多用户网关（[`gateway/`](gateway/README.md)）：个人 API Key、权限范围、模型白名单、限流与额度、逐次调用审计和网页控制台
 - 支持可选的上游备用 API Key，并带有限重试
 - 提供 macOS arm64 / x86_64 原生可执行包和 LaunchAgent 管理脚本
 - 提供 Windows x64 EXE 包、前台启动、静默启动和开机自启动脚本
@@ -46,7 +55,7 @@ cx2cc 不是 Anthropic 官方 API，也不实现 Anthropic API 的全部功能�
 
 已知限制：
 
-- 只暴露 `/v1/messages`、`/v1/models`、`/usage`、`/accounts` 和 `/health`。
+- 只暴露 `/v1/messages`、`/v1/chat/completions`、`/v1/responses`、`/v1/alpha/search`、`/v1/images/generations`、`/v1/images/edits`（OpenAI 协议接口另有 `/openai/v1/` 别名）、`/v1/models`、`/usage`、`/accounts` 和 `/health`。
 - Batches、Files、token counting、Anthropic server-side tools、structured outputs、原生 thinking blocks 等能力尚未完整实现。
 - Prompt 缓存依赖上游的自动缓存（见 [Prompt 缓存](#prompt-缓存)）；请求中的 Anthropic `cache_control` 标记会被忽略。
 - 流式 token usage 取决于上游是否返回 usage chunk（代理会自动请求 `stream_options.include_usage`）；上游不返回时 input tokens 记为 `0`。
@@ -66,6 +75,32 @@ cx2cc 自身不缓存任何内容，但会让上游的自动 prompt 缓存持续
 - `cache_creation_input_tokens` 恒为 `0`；OpenAI 风格上游没有"写缓存"计费。
 
 如果你的上游会拒绝未知请求字段，设置 `CX2CC_PROMPT_CACHE_KEY=off` 关闭该功能。
+
+## 模型解析
+
+每个请求的模型名在发往上游前按同一套规则处理：
+
+1. 去掉末尾的窗口标记，例如 `[1m]`。
+2. 按 `CX2CC_MODEL_ALIASES`（`旧名=新名,旧名=新名`）改写，可以在不动客户端的情况下把钉在旧模型上的机器整体挪到新默认模型。
+3. 结果在放行名单里就直接使用：`CX2CC_MODEL_PASSTHROUGH` 加上上游自己 `/models` 公布的模型（缓存十分钟）。
+4. Claude Code 自带的模型名（`claude-*`、`opus`、`sonnet`、`haiku` 等）和不带模型的请求，使用 `CX2CC_UPSTREAM_MODEL`。
+5. 其他名字返回 400 并列出可用模型（默认 `CX2CC_UNKNOWN_MODEL=reject`）；设为 `default` 则恢复旧行为，悄悄用默认模型服务。
+
+`GET /v1/models` 转发上游目录，并标注本代理的处理：`default_model`、`aliases`、`unknown_model_policy`，以及被改写条目上的 `served_as`。`?refresh=1` 会转给上游以跳过缓存。设置 `CX2CC_REPORT_UPSTREAM_MODEL=true` 后，响应里写的是实际服务请求的模型。
+
+## 网页搜索
+
+Claude Code 的 WebSearch 会以强制工具调用的方式发送 Anthropic 托管搜索工具（`web_search_<日期>`）。cx2cc 把它映射到上游原生的 `web_search` 工具（`allowed_domains` 转成上游的 `filters`，`blocked_domains` 与 `max_uses` 没有对应项），再根据上游的搜索调用和 `url_citation` 标注，重建 `server_tool_use`、`web_search_tool_result` 块以及 `usage.server_tool_use`，流式与非流式都支持。Codex CLI 自己的搜索不需要映射：`/v1/responses` 与 `/v1/alpha/search` 都是逐字节透传。
+
+## OpenAI 协议透传
+
+给原生说 OpenAI 协议的客户端（SDK、Chatbox、Codex CLI 等）用的入口，与 `/v1/messages` 共用上游、Key 轮换和缓存 key 策略，但不做协议转换：
+
+- `POST /v1/chat/completions`：请求体原样转发，只做三件事：按上面的规则解析模型；客户端没带时自动补上会话级 `prompt_cache_key`；流式请求补 `stream_options.include_usage`。响应逐字节返回。
+- `POST /v1/responses`：Codex CLI 0.135 起只发 Responses，SSE 原样返回。
+- `POST /v1/alpha/search`：Codex CLI 0.158 起在客户端侧调用独立搜索，请求与响应原样转发。
+- `POST /v1/images/generations`、`POST /v1/images/edits`：OpenAI Images 形状，`edits` 额外带 `images`（最多 16 张 data URL 参考图，顺序有意义）。单张图约 15 秒，`n` 最大 4，超时 600 秒。
+- 错误使用 OpenAI 的 `{"error": {"message", "type", "code"}}` 形状；`/v1/messages` 的回复风格段不会注入这些接口。
 
 ## 回复风格注入
 
@@ -87,6 +122,12 @@ cx2cc 会在每个 `/v1/messages` 请求的 system prompt 末尾追加一段风�
 在 CC Switch 中，在供应商卡片上启用用量查询，用自定义脚本请求 `{{baseUrl}}/usage`（请求头 `x-api-key: {{apiKey}}`），再按上游实际字段写提取逻辑即可。
 
 `GET /accounts`（别名 `GET /v1/accounts`）是同样的透传，用于上游同时挂了多个订阅、需要知道当前由哪个账号服务的场景。查询串会一并转发，因此 `?usage=0` 之类的上游过滤参数经过 cx2cc 依然有效；上游没有该端点时返回 404，原样转发。
+
+## 多用户网关
+
+cx2cc 本身不认证任何人，只把调用方的 Key 转给上游。多人共用一个入口时，在前面加一层 [cx2cc-gateway](gateway/README.md)：每人一把 Key（别名、使用人、权限范围、可选的模型白名单、每分钟请求数 / 并发 / 每日 / 近 7 日额度、有效期、带宽限期的轮换、吊销），网关核验后换成 cx2cc 唯一认可的内部凭据转发，流式响应不缓冲地返回，每次调用写一条审计（谁、何时、从哪里、哪个模型、多少 token、耗时、失败原因，不记录提示词和回复）。`/admin/` 下的网页控制台有管理员、Key 管理员（可以创建 Key，只看得到自己创建的）和审计员三种角色，持 Key 的人也可以用自己的 Key 登录查看用量。网关是独立的 aiohttp 服务，自带测试和 Docker 镜像，cx2cc 本身不需要任何改动。
+
+`site/index.html` 是部署根路径上的项目介绍页。
 
 ## 环境要求
 
@@ -304,7 +345,10 @@ Windows 脚本会根据脚本自身位置定位 release/源码目录。release �
 | `CX2CC_UPSTREAM_BASE_URL` | 是 | 无 | OpenAI 兼容 API base URL，例如 `https://example.com/v1`。 |
 | `CX2CC_UPSTREAM_API_KEY` | 否 | 无 | 请求未提供 `x-api-key` 时使用的备用上游 key。 |
 | `CX2CC_UPSTREAM_API_KEYS` | 否 | 无 | 逗号或换行分隔的多个备用 key；优先于 `CX2CC_UPSTREAM_API_KEY`。 |
-| `CX2CC_UPSTREAM_MODEL` | 否 | `gpt-5.5` | 每个请求向上游申请的模型名。 |
+| `CX2CC_UPSTREAM_MODEL` | 否 | `gpt-5.5` | 默认上游模型：Claude 模型名、不带模型的请求，以及 `CX2CC_UNKNOWN_MODEL=default` 时的未知模型都用它。 |
+| `CX2CC_MODEL_ALIASES` | 否 | 无 | `旧名=新名,旧名=新名` 形式的改写，在去掉窗口后缀之后、检查放行名单之前生效。 |
+| `CX2CC_MODEL_PASSTHROUGH` | 否 | 无 | 逗号分隔的、客户端可以直接请求的模型名，与上游 `/models` 列表合并。 |
+| `CX2CC_UNKNOWN_MODEL` | 否 | `reject` | `reject` 对未知模型名返回 400；`default` 用 `CX2CC_UPSTREAM_MODEL` 服务。 |
 | `CX2CC_REPORT_UPSTREAM_MODEL` | 否 | 关 | 设为 `1`/`true`/`yes`/`on` 时，响应中报告上游实际服务的模型，而不是回显客户端请求的模型名。 |
 | `CX2CC_PROMPT_CACHE_KEY` | 否 | 开 | 设为 `off` 时不再向上游发送会话级 `prompt_cache_key`。 |
 | `CX2CC_STYLE` | 否 | 开 | 设为 `off` 时不再向 system prompt 追加回复风格段。 |
@@ -317,7 +361,15 @@ Windows 脚本会根据脚本自身位置定位 release/源码目录。release �
 
 ```bash
 python -m pytest
-python -m compileall server.py translator.py start-cx2cc.py
+python -m compileall server.py translator.py prompt_estimate.py start-cx2cc.py
+```
+
+网关有自己的依赖和测试：
+
+```bash
+cd gateway
+python -m pip install -r requirements-dev.txt
+python -m pytest
 ```
 
 在 Windows 上构建 EXE：
