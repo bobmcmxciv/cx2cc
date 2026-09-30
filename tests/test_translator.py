@@ -606,3 +606,29 @@ def test_resolve_model_no_alias_env_is_identity(monkeypatch):
 
     assert resolve_model("gpt-5.6-sol") == "gpt-5.6-sol"
 
+
+
+def test_in_conversation_system_message_is_stable_across_turns(monkeypatch):
+    # Claude Code sends the newest system message as a text-block list with
+    # cache_control and the same message as a plain string one turn later;
+    # history must translate identically or the upstream cache breaks there.
+    monkeypatch.setenv("CX2CC_STYLE", "off")
+    note = "<total_tokens>14958390 tokens left</total_tokens>"
+    newest = {"role": "system", "content": [{"type": "text", "text": note, "cache_control": {"type": "ephemeral"}}]}
+    replayed = {"role": "system", "content": note}
+    history = [{"role": "user", "content": "go"}, {"role": "assistant", "content": "ok"}]
+
+    turn_n = translate_request({"system": "S", "messages": history + [newest]})
+    turn_n1 = translate_request({"system": "S", "messages": history + [replayed, {"role": "user", "content": "next"}]})
+
+    assert turn_n["messages"][-1] == {"role": "system", "content": note}
+    assert turn_n1["messages"][: len(turn_n["messages"])] == turn_n["messages"]
+
+
+def test_empty_in_conversation_system_message_is_dropped(monkeypatch):
+    monkeypatch.setenv("CX2CC_STYLE", "off")
+    result = translate_request({"messages": [
+        {"role": "user", "content": "hi"},
+        {"role": "system", "content": [{"type": "text", "text": "  "}]},
+    ]})
+    assert result["messages"] == [{"role": "user", "content": "hi"}]

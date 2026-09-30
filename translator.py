@@ -402,6 +402,18 @@ def translate_request(body: dict) -> dict:
         role = msg["role"]
         content = msg.get("content", "")
 
+        if role == "system":
+            # Claude Code puts system messages (hook context, token budget
+            # notes) between turns. The newest one arrives as a text-block
+            # list carrying cache_control, and the very same message comes
+            # back as a plain string on the next turn. Both forms must
+            # translate identically, or every turn rewrites history and the
+            # upstream prompt cache breaks at that point.
+            text = _system_message_text(content)
+            if text.strip():
+                openai_body["messages"].append({"role": "system", "content": text})
+            continue
+
         if isinstance(content, str):
             openai_body["messages"].append({"role": role, "content": content})
         elif isinstance(content, list):
@@ -469,6 +481,18 @@ def translate_request(body: dict) -> dict:
         openai_body["prompt_cache_key"] = _prompt_cache_key(body)
 
     return openai_body
+
+
+def _system_message_text(content) -> str:
+    """Text of an in-conversation system message, independent of its form."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            b.get("text", "") for b in content
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
+    return ""
 
 
 def _convert_content_blocks(role: str, blocks: list, msg_idx: int = 0) -> list:
