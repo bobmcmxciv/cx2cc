@@ -39,7 +39,7 @@ jobs:
         run: python -m pytest
 
       - name: Compile check
-        run: python -m compileall server.py translator.py start-cx2cc.py
+        run: python -m compileall server.py translator.py prompt_estimate.py start-cx2cc.py
 
       - name: Build executable
         run: python -m PyInstaller --clean --onefile --name cx2cc --windowed start-cx2cc.py
@@ -201,7 +201,7 @@ jobs:
         run: python -m pytest
 
       - name: Compile check
-        run: python -m compileall server.py translator.py start-cx2cc.py
+        run: python -m compileall server.py translator.py prompt_estimate.py start-cx2cc.py
 
       - name: Build executable
         run: python -m PyInstaller --clean --onefile --name cx2cc start-cx2cc.py
@@ -344,7 +344,7 @@ jobs:
         run: python -m pytest
 
       - name: Compile check
-        run: python -m compileall server.py translator.py start-cx2cc.py
+        run: python -m compileall server.py translator.py prompt_estimate.py start-cx2cc.py
 
       - name: Build executable
         run: python -m PyInstaller --clean --onefile --name cx2cc start-cx2cc.py

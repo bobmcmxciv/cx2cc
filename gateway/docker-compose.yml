@@ -1,0 +1,23 @@
+services:
+  cx2cc-gateway:
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${GW_BASE_IMAGE:-python:3.12-slim}
+        PIP_INDEX_URL: ${GW_PIP_INDEX_URL:-https://pypi.org/simple}
+    image: cx2cc-gateway:latest
+    container_name: cx2cc-gateway
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      CX2CC_GW_DATA_DIR: /data
+    volumes:
+      - ./data:/data
+    ports:
+      # Publish only where the reverse proxy can reach it, never publicly.
+      - "${GW_BIND:-127.0.0.1}:${GW_PORT:-13030}:8000"
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
