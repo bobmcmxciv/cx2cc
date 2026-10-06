@@ -86,7 +86,8 @@
   <div class="cta">
     <a class="btn primary" href="/admin/">进入管理控制台</a>
     <a class="btn" href="/admin/#/key-login">用我的 Key 查看用量</a>
-    <a class="btn" href="https://github.com/bobmcmxciv/cx2cc">源代码</a>
+    <a class="btn" href="https://github.com/bobmcmxciv/cx2cc">cx2cc 源代码</a>
+    <a class="btn" href="https://github.com/bobmcmxciv/codex-bridge">codex-bridge 源代码</a>
   </div>
   <nav class="toc">
     <a href="#quickstart">接入</a><a href="#arch">架构</a><a href="#gateway">公网入口与网关</a>
@@ -208,7 +209,9 @@ Authorization = "Bearer sk-cx2cc-你的Key"</code></pre>
 </div>
 
 <h2 id="bridge">codex-bridge：上游适配与账号池</h2>
-<p>Codex 后端只接受 ChatGPT 登录凭据和 Responses 协议。codex-bridge 把这一层包起来，让上面的 cx2cc 像调用普通 OpenAI 兼容接口一样调用它。</p>
+<p>Codex 后端只接受 ChatGPT 登录凭据和 Responses 协议。codex-bridge 把这一层包起来，让上面的 cx2cc 像调用普通 OpenAI 兼容接口一样调用它。
+代码开源在 <a href="https://github.com/bobmcmxciv/codex-bridge">github.com/bobmcmxciv/codex-bridge</a>，
+单独使用也可以：任何能填 OpenAI 兼容地址的客户端都能直接接它。</p>
 <div class="features">
   <div class="feat"><b>ChatGPT 登录直连</b><span>使用 Codex CLI 的 ChatGPT OAuth 凭据，不需要 OpenAI API Key；访问令牌过期前约 5 分钟自动刷新并写回。</span></div>
   <div class="feat"><b>协议适配</b><span>Chat Completions 转 Codex Responses，工具调用、图片输入、推理强度和流式输出都支持；Responses 请求原样转发。</span></div>
@@ -217,9 +220,33 @@ Authorization = "Bearer sk-cx2cc-你的Key"</code></pre>
   <div class="feat"><b>账号管理工具</b><span>导入、分离、排序、手动停用与恢复、备份与还原；登录新账号前先分离，避免 <code>codex login</code> 吊销正在服务的会话。同一文件换了账号会被识别出来，不会悄悄换人服务。</span></div>
   <div class="feat"><b>模型目录</b><span>按本机 Codex CLI 的版本号向后端拉取可用模型、上下文窗口与推理强度，缓存一小时，拉取失败时沿用上一份。</span></div>
   <div class="feat"><b>超长上下文兜底</b><span>后端拒绝超出窗口的提示词时，先换一个缓存亲和 key 重试，再切到长上下文模型，其他拒绝原样返回。</span></div>
-  <div class="feat"><b>出图与搜索</b><span>gpt-image-2 文生图与参考图编辑走同一订阅，一次最多 4 张；网页搜索支持域名过滤并带回来源链接。</span></div>
+  <div class="feat"><b>推理链跨轮回传</b><span>上游返回的加密推理内容随助手消息带回客户端，下一轮原样送回，模型能接着上一轮的思路往下做，而不是每轮从头推理。可用 <code>CODEX_REASONING_REPLAY=off</code> 关闭。</span></div>
+  <div class="feat"><b>稳定的提示词前缀</b><span>对话中途插入的 system 消息留在原位，作为 developer 消息发送，不再并进开头的指令。客户端追加提示时前缀不变，上游缓存照常命中。</span></div>
+  <div class="feat"><b>出图与搜索</b><span>gpt-image-2 文生图与参考图编辑走同一订阅，一次最多 4 张；网页搜索支持域名过滤并带回来源链接；Codex 0.158 起的独立搜索接口 <code>/v1/alpha/search</code> 直接转发。</span></div>
   <div class="feat"><b>额度查询</b><span>直接读取订阅的周窗口用量、重置时间与额外额度，缓存 30 秒。</span></div>
 </div>
+
+<h3>自己部署</h3>
+<p>需要 Python 3.12、一台能访问 chatgpt.com 的机器，以及至少一个已用 <code>codex login</code> 登录过的 ChatGPT 订阅。</p>
+<pre><code>git clone https://github.com/bobmcmxciv/codex-bridge
+cd codex-bridge
+pip install -r requirements.txt
+cp .env.example .env                 # 至少改掉 CODEX_BRIDGE_TOKEN
+python manage_accounts.py detach     # 把 ~/.codex/auth.json 收进账号池
+python codex_bridge.py               # 默认监听 127.0.0.1:8902</code></pre>
+<p>客户端把 Base URL 设成 <code>http://127.0.0.1:8902/v1</code>，API Key 填 <code>CODEX_BRIDGE_TOKEN</code> 的值。
+要加第二个账号，先 <code>detach</code> 再 <code>codex login</code>，然后 <code>manage_accounts.py import --id 名字</code>：
+<code>codex login</code> 会在 OpenAI 那边吊销 <code>auth.json</code> 里原有的会话，不先分离就会丢掉正在服务的账号。</p>
+<div class="scroll"><table>
+  <tr><th>环境变量</th><th>作用</th></tr>
+  <tr><td><code>CODEX_BRIDGE_TOKEN</code></td><td>客户端访问 bridge 用的共享密钥</td></tr>
+  <tr><td><code>CODEX_BRIDGE_HOST</code> / <code>CODEX_BRIDGE_PORT</code></td><td>监听地址，默认 <code>127.0.0.1:8902</code>；不建议直接对公网开放</td></tr>
+  <tr><td><code>CODEX_MODEL</code></td><td>默认模型，客户端没指定或指定了不认识的名字时使用</td></tr>
+  <tr><td><code>CODEX_MODEL_LONG</code></td><td>提示词超出默认模型窗口时改用的长上下文模型</td></tr>
+  <tr><td><code>CODEX_REASONING_EFFORT</code></td><td>默认推理强度</td></tr>
+  <tr><td><code>CODEX_CLI_PATH</code></td><td>本机 Codex CLI 路径，用它的版本号拉取模型目录</td></tr>
+  <tr><td><code>CODEX_HOME</code></td><td>Codex 凭据目录，以系统服务运行时需要显式指定</td></tr>
+</table></div>
 
 <h2 id="api">接口</h2>
 <p>以下路径都挂在 <code>https://cx2cc.bobmcmxciv.xin/api</code> 下。Key 放在 <code>x-api-key</code> 或
@@ -276,7 +303,8 @@ Authorization = "Bearer sk-cx2cc-你的Key"</code></pre>
 
 <footer>
   API Key 等同于密码：不要贴进公开仓库、截图、群聊或网盘。怀疑泄露时请管理员立即轮换或吊销。<br>
-  源代码：<a href="https://github.com/bobmcmxciv/cx2cc">github.com/bobmcmxciv/cx2cc</a>
+  源代码：<a href="https://github.com/bobmcmxciv/cx2cc">github.com/bobmcmxciv/cx2cc</a> ·
+  <a href="https://github.com/bobmcmxciv/codex-bridge">github.com/bobmcmxciv/codex-bridge</a>
 </footer>
 
 </div>
