@@ -203,6 +203,48 @@ TOOL_RESULT_IMAGE_PLACEHOLDER = "[image output — the image itself follows in t
 TOOL_RESULT_IMAGE_PREAMBLE = "Image content returned by the tool call(s) above:"
 
 
+# Reasoning carry-over. codex-bridge hands each finished upstream reasoning
+# item over as `reasoning_items` (encrypted, opaque) and replays the ones it
+# gets back on an assistant message. Claude Code keeps an assistant's thinking
+# blocks in its history and sends them back verbatim, so the item rides there:
+# a thinking block whose signature is this prefix plus the encrypted content,
+# its text the (usually empty) reasoning summary. Without it the model lost its
+# reasoning at every tool call, while Codex CLI keeps it. A thinking block with
+# any other signature is a real Anthropic one and is still dropped.
+REASONING_SIGNATURE_PREFIX = "cx2cc-rs1:"
+
+
+def reasoning_replay_enabled() -> bool:
+    """On by default; CX2CC_REASONING_REPLAY=off stops emitting and replaying."""
+    return os.environ.get("CX2CC_REASONING_REPLAY", "").strip().lower() not in (
+        "0", "off", "false", "no",
+    )
+
+
+def _thinking_block(item: dict) -> dict | None:
+    """codex-bridge reasoning item -> Anthropic thinking block."""
+    if not isinstance(item, dict) or not item.get("encrypted_content"):
+        return None
+    summary = "\n\n".join(
+        p.get("text", "") for p in item.get("summary") or []
+        if isinstance(p, dict) and p.get("text")
+    )
+    return {
+        "type": "thinking",
+        "thinking": summary,
+        "signature": REASONING_SIGNATURE_PREFIX + item["encrypted_content"],
+    }
+
+
+def _reasoning_item(block: dict) -> dict | None:
+    """Anthropic thinking block -> codex-bridge reasoning item, if it is one of ours."""
+    sig = block.get("signature")
+    if not isinstance(sig, str) or not sig.startswith(REASONING_SIGNATURE_PREFIX):
+        return None
+    encrypted = sig[len(REASONING_SIGNATURE_PREFIX):]
+    return {"encrypted_content": encrypted} if encrypted else None
+
+
 def prompt_cache_key_enabled() -> bool:
     """Whether to attach a per-conversation `prompt_cache_key` upstream.
 
@@ -363,7 +405,10 @@ def request_diag(openai_body: dict) -> str:
             marks.append(f"{i}:{h.hexdigest()[:8]}")
     marks.append(f"{len(msgs)}:{h.hexdigest()[:8]}")
     key = openai_body.get("prompt_cache_key", "-")
-    return f"key={key[:8]} tools={len(tools)} h[{' '.join(marks)}]"
+    # Reasoning items the client sent back: 0 on a long tool loop means the
+    # client dropped the thinking blocks and the carry-over is not happening.
+    rs = sum(len(m.get("reasoning_items") or []) for m in msgs)
+    return f"key={key[:8]} tools={len(tools)} h[{' '.join(marks)}] rs={rs}"
 
 # ============================================================
 # 请求翻译: Anthropic -> OpenAI
@@ -437,7 +482,7 @@ def translate_request(body: dict) -> dict:
                     "function": {
                         "name": t["name"],
                         "description": t.get("description", ""),
-                        "parameters": t.get("input_schema", {"type": "object", "properties": {}})
+                        "parameters": _tool_parameters(t.get("input_schema"))
                     }
                 })
         openai_body["tools"] = openai_tools
@@ -483,6 +528,11 @@ def translate_request(body: dict) -> dict:
     return openai_body
 
 
+def _tool_parameters(schema) -> dict:
+    schema = schema or {"type": "object", "properties": {}}
+    return nullable_optional_schema(schema) if nullable_optionals_enabled() else schema
+
+
 def _system_message_text(content) -> str:
     """Text of an in-conversation system message, independent of its form."""
     if isinstance(content, str):
@@ -502,6 +552,7 @@ def _convert_content_blocks(role: str, blocks: list, msg_idx: int = 0) -> list:
     tool_calls = []
     tool_msgs = []
     tool_result_images = []
+    reasoning_items = []
 
     for block_idx, block in enumerate(blocks):
         if not isinstance(block, dict):
@@ -559,7 +610,11 @@ def _convert_content_blocks(role: str, blocks: list, msg_idx: int = 0) -> list:
             image_url = _convert_image_block(block)
             if image_url:
                 openai_content.append({"type": "image_url", "image_url": {"url": image_url}})
-        elif t in ("thinking", "redacted_thinking"):
+        elif t == "thinking" and role == "assistant":
+            item = _reasoning_item(block) if reasoning_replay_enabled() else None
+            if item:
+                reasoning_items.append(item)
+        elif t == "redacted_thinking":
             pass  # 丢弃
 
     messages = []
@@ -574,6 +629,8 @@ def _convert_content_blocks(role: str, blocks: list, msg_idx: int = 0) -> list:
             })
         elif content_str:
             messages.append({"role": "assistant", "content": content_str})
+        if reasoning_items and messages:
+            messages[-1]["reasoning_items"] = reasoning_items
     else:  # user
         non_tool_content = openai_content or ([{"type": "text", "text": "\n".join(text_parts)}] if text_parts else [])
         if tool_msgs:
@@ -810,10 +867,106 @@ def _server_tool_use_events(index: int, tool_id: str, query: str):
 # 非流式响应翻译: OpenAI -> Anthropic
 # ============================================================
 
+# GPT models answer every function call with *all* schema properties filled
+# in, optional ones included, and use "" for "no value". Claude Code rejects
+# some of those placeholders outright: Read with `pages: ""` fails with
+# "Invalid pages parameter", so the image or file is never returned (measured on
+# 2026-10-05 replays: 10-30% of gpt-6-luna's screenshot reads, and Read failures
+# in every gpt-6.1-sol run; the model often retries the identical call until
+# its turns run out). An empty optional argument carries no information, so it
+# is removed before the call reaches the client. Required ones are left alone:
+# `Edit.new_string: ""` legitimately means "delete".
+
+def nullable_optionals_enabled() -> bool:
+    """On by default; CX2CC_NULLABLE_OPTIONALS=off sends tool schemas unchanged."""
+    return os.environ.get("CX2CC_NULLABLE_OPTIONALS", "").strip().lower() not in (
+        "0", "off", "false", "no",
+    )
+
+
+NULLABLE_HINT = "Optional: pass null to leave it unset (the default)."
+
+
+def nullable_optional_schema(schema: dict) -> dict:
+    """Let every optional top-level property be null, and say so.
+
+    GPT models treat a function schema as if every property were required:
+    with no way to say "not set" they invent a value — `""` for strings, and
+    for an enum the first plausible member. Claude Code's Agent tool got
+    `isolation: "worktree"` or `"remote"` on every one of 86 gpt-6-luna /
+    gpt-6.1-sol calls in the 2026-10-05 replays, so each sub-agent ran in a
+    copy of the repo without the uncommitted changes it was sent to review.
+    Offering null gives them a way to decline; clean_tool_input then drops it.
+    """
+    if not isinstance(schema, dict) or not isinstance(schema.get("properties"), dict):
+        return schema
+    required = set(schema.get("required") or [])
+    props = {}
+    for name, spec in schema["properties"].items():
+        if name in required or not isinstance(spec, dict):
+            props[name] = spec
+            continue
+        spec = dict(spec)
+        t = spec.get("type")
+        if isinstance(t, str) and t != "null":
+            spec["type"] = [t, "null"]
+        elif isinstance(t, list) and "null" not in t:
+            spec["type"] = t + ["null"]
+        elif t is None and isinstance(spec.get("anyOf"), list):
+            spec["anyOf"] = spec["anyOf"] + [{"type": "null"}]
+        if isinstance(spec.get("enum"), list) and None not in spec["enum"]:
+            spec["enum"] = spec["enum"] + [None]
+        desc = spec.get("description", "")
+        spec["description"] = (desc.rstrip() + " " + NULLABLE_HINT).strip()
+        props[name] = spec
+    return {**schema, "properties": props}
+
+
+def tool_arg_schemas(anthropic_tools) -> dict:
+    """{tool name: set of optional property names} for the request's tools.
+
+    With nullable optionals (the default) any optional property may come back
+    null, so every tool that has one is listed and its arguments are buffered
+    for cleaning; tools with only required properties (Write, ...) keep
+    streaming unbuffered. With them off, only optional properties that could
+    hold an empty string need it.
+    """
+    nullable = nullable_optionals_enabled()
+    out = {}
+    for t in anthropic_tools or []:
+        if not isinstance(t, dict) or not t.get("name"):
+            continue
+        schema = t.get("input_schema") or {}
+        props = schema.get("properties") or {}
+        required = set(schema.get("required") or [])
+        optional = set()
+        for name, spec in props.items():
+            if name in required:
+                continue
+            types = (spec or {}).get("type") if isinstance(spec, dict) else None
+            types = types if isinstance(types, list) else [types]
+            if nullable or None in types or "string" in types or "null" in types:
+                optional.add(name)
+        if optional:
+            out[t["name"]] = optional
+    return out
+
+
+def clean_tool_input(inp, optional) -> dict:
+    """Drop optional arguments whose value is null or an empty/blank string."""
+    if not isinstance(inp, dict) or not optional:
+        return inp
+    return {
+        k: v for k, v in inp.items()
+        if not (k in optional and (v is None or (isinstance(v, str) and not v.strip())))
+    }
+
+
 def translate_response(
     openai_body: dict,
     display_model: str = "claude-sonnet-4-6",
     use_upstream_model: bool = False,
+    tool_schemas: dict | None = None,
 ) -> dict:
     """OpenAI Chat Completion -> Anthropic Message
 
@@ -836,6 +989,12 @@ def translate_response(
     )
     searches = sum(1 for b in content_blocks if b.get("type") == "server_tool_use")
 
+    if reasoning_replay_enabled():
+        for item in message.get("reasoning_items") or []:
+            block = _thinking_block(item)
+            if block:
+                content_blocks.append(block)
+
     text_content = message.get("content")
     if text_content:
         content_blocks.append({"type": "text", "text": text_content})
@@ -846,6 +1005,7 @@ def translate_response(
             inp = json.loads(fn.get("arguments", "{}"))
         except json.JSONDecodeError:
             inp = {}
+        inp = clean_tool_input(inp, (tool_schemas or {}).get(fn.get("name", "")))
         content_blocks.append({
             "type": "tool_use",
             "id": tc.get("id", ""),
@@ -894,6 +1054,7 @@ def stream_translate(
     diag: str = "",
     prompt_usage: dict | None = None,
     on_usage=None,
+    tool_schemas: dict | None = None,
 ):
     """生成器: 从 OpenAI SSE stream 读取，逐事件生成 Anthropic SSE
 
@@ -986,18 +1147,46 @@ def stream_translate(
         if fr:
             finish_reason = fr
 
+        # --- Reasoning carry-over: one thinking block per upstream item ---
+        for item in (delta.get("reasoning_items") or []) if reasoning_replay_enabled() else []:
+            block = _thinking_block(item)
+            if not block:
+                continue
+            if state == "IN_TEXT":
+                yield _sse("content_block_stop", {"type": "content_block_stop", "index": content_idx})
+                content_idx += 1
+                state = "IDLE"
+            elif state == "IN_TOOL" and active_tool_idx >= 0:
+                yield from _close_tool(active_tool_idx, tool_states)
+                content_idx += 1
+                active_tool_idx = -1
+                state = "IDLE"
+            yield _sse("content_block_start", {
+                "type": "content_block_start",
+                "index": content_idx,
+                "content_block": {"type": "thinking", "thinking": "", "signature": ""},
+            })
+            if block["thinking"]:
+                yield _sse("content_block_delta", {
+                    "type": "content_block_delta",
+                    "index": content_idx,
+                    "delta": {"type": "thinking_delta", "thinking": block["thinking"]},
+                })
+            yield _sse("content_block_delta", {
+                "type": "content_block_delta",
+                "index": content_idx,
+                "delta": {"type": "signature_delta", "signature": block["signature"]},
+            })
+            yield _sse("content_block_stop", {"type": "content_block_stop", "index": content_idx})
+            content_idx += 1
+
         # --- Text content ---
         text = delta.get("content")
         if text:
             if state == "IN_TOOL" and active_tool_idx >= 0:
-                # Read the index before _close_tool pops the entry, and move
-                # past it: the text that follows is a new block, not this one.
-                prev_anth_idx = tool_states[active_tool_idx]["anthropic_idx"]
-                _close_tool(active_tool_idx, tool_states)
-                yield _sse("content_block_stop", {
-                    "type": "content_block_stop",
-                    "index": prev_anth_idx
-                })
+                # Close the tool block and move past it: the text that
+                # follows is a new block, not this one.
+                yield from _close_tool(active_tool_idx, tool_states)
                 content_idx += 1
                 active_tool_idx = -1
                 state = "IDLE"
@@ -1029,18 +1218,18 @@ def stream_translate(
                     })
                     content_idx += 1
                 elif state == "IN_TOOL" and active_tool_idx >= 0:
-                    prev_anth_idx = tool_states[active_tool_idx]["anthropic_idx"]
-                    _close_tool(active_tool_idx, tool_states)
-                    yield _sse("content_block_stop", {
-                        "type": "content_block_stop", "index": prev_anth_idx
-                    })
+                    yield from _close_tool(active_tool_idx, tool_states)
                     content_idx += 1
 
+                name = tc.get("function", {}).get("name", "")
                 tool_states[oai_idx] = {
                     "id": tc.get("id", ""),
-                    "name": tc.get("function", {}).get("name", ""),
+                    "name": name,
                     "args_str": "",
                     "anthropic_idx": content_idx,
+                    # Arguments of a tool that may need cleaning are held back
+                    # and sent as one delta when the call is complete.
+                    "optional": (tool_schemas or {}).get(name),
                 }
                 active_tool_idx = oai_idx
                 state = "IN_TOOL"
@@ -1059,6 +1248,8 @@ def stream_translate(
             args = tc.get("function", {}).get("arguments", "")
             if args:
                 tool_states[oai_idx]["args_str"] += args
+                if tool_states[oai_idx]["optional"]:
+                    continue
                 yield _sse("content_block_delta", {
                     "type": "content_block_delta",
                     "index": tool_states[oai_idx]["anthropic_idx"],
@@ -1086,9 +1277,7 @@ def stream_translate(
                 content_idx += 1
                 state = "IDLE"
             elif state == "IN_TOOL" and active_tool_idx >= 0:
-                prev_anth_idx = tool_states[active_tool_idx]["anthropic_idx"]
-                _close_tool(active_tool_idx, tool_states)
-                yield _sse("content_block_stop", {"type": "content_block_stop", "index": prev_anth_idx})
+                yield from _close_tool(active_tool_idx, tool_states)
                 content_idx += 1
                 active_tool_idx = -1
                 state = "IDLE"
@@ -1119,10 +1308,7 @@ def stream_translate(
         yield _sse("content_block_stop", {"type": "content_block_stop", "index": content_idx})
         content_idx += 1
     elif state == "IN_TOOL" and active_tool_idx >= 0:
-        st = tool_states[active_tool_idx]
-        yield _sse("content_block_stop", {
-            "type": "content_block_stop", "index": st["anthropic_idx"]
-        })
+        yield from _close_tool(active_tool_idx, tool_states)
         content_idx += 1
 
     # Web search results, now that every citation (and so every title) is in.
@@ -1186,8 +1372,25 @@ def stream_translate(
 
 
 def _close_tool(idx: int, tool_states: dict):
-    """Pop tool state entry (cleanup only — caller emits SSE events)."""
-    tool_states.pop(idx, {})
+    """Pop a tool's state and yield the events that end its content block.
+
+    A buffered tool (one with optional string arguments) gets its whole,
+    cleaned argument JSON as a single input_json_delta first.
+    """
+    st = tool_states.pop(idx, None)
+    if not st:
+        return
+    if st.get("optional") and st["args_str"]:
+        try:
+            args = json.dumps(clean_tool_input(json.loads(st["args_str"]), st["optional"]), ensure_ascii=False)
+        except json.JSONDecodeError:
+            args = st["args_str"]  # not ours to repair; let the client report it
+        yield _sse("content_block_delta", {
+            "type": "content_block_delta",
+            "index": st["anthropic_idx"],
+            "delta": {"type": "input_json_delta", "partial_json": args},
+        })
+    yield _sse("content_block_stop", {"type": "content_block_stop", "index": st["anthropic_idx"]})
 
 
 def _sse(event: str, data: dict) -> str:

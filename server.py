@@ -23,6 +23,7 @@ from translator import (
     prepare_openai_passthrough,
     request_diag,
     stream_translate,
+    tool_arg_schemas,
     translate_request,
     translate_response,
     upstream_model,
@@ -285,14 +286,16 @@ def handle_messages():
         log.exception("Request translation failed")
         return _err(400, "Translation error")
 
+    tool_schemas = tool_arg_schemas(anthropic_body.get("tools"))
+
     # Fingerprint every request so cache-miss forensics don't depend on data
     # that only exists while the request is in flight (see request_diag).
     diag = f"msgs={msg_count} {request_diag(openai_body)}"
     log.info("-> diag %s", diag)
 
     if stream:
-        return _handle_stream(openai_body, model_name, api_key=api_key, diag=diag)
-    return _handle_nonstream(openai_body, model_name, api_key=api_key, diag=diag)
+        return _handle_stream(openai_body, model_name, api_key=api_key, diag=diag, tool_schemas=tool_schemas)
+    return _handle_nonstream(openai_body, model_name, api_key=api_key, diag=diag, tool_schemas=tool_schemas)
 
 
 def _prompt_estimate_for(openai_body: dict):
@@ -308,7 +311,8 @@ def _prompt_estimate_for(openai_body: dict):
     return key, chars, prompt_estimate.estimate(key, chars)
 
 
-def _handle_stream(openai_body: dict, display_model: str, api_key: str = "", diag: str = ""):
+def _handle_stream(openai_body: dict, display_model: str, api_key: str = "", diag: str = "",
+                   tool_schemas: dict | None = None):
     chat_url = _chat_url()
     if not chat_url:
         return _err(502, "No upstream base URL configured (set CX2CC_UPSTREAM_BASE_URL)")
@@ -358,6 +362,7 @@ def _handle_stream(openai_body: dict, display_model: str, api_key: str = "", dia
                     on_usage=lambda tokens, cached: prompt_estimate.record(
                         est_key, est_chars, tokens, cached
                     ),
+                    tool_schemas=tool_schemas,
                 ):
                     yield chunk
             except Exception as exc:
@@ -390,7 +395,8 @@ def _handle_stream(openai_body: dict, display_model: str, api_key: str = "", dia
     return _err(502, "Upstream request failed for all configured keys")
 
 
-def _handle_nonstream(openai_body: dict, display_model: str, api_key: str = "", diag: str = ""):
+def _handle_nonstream(openai_body: dict, display_model: str, api_key: str = "", diag: str = "",
+                      tool_schemas: dict | None = None):
     chat_url = _chat_url()
     if not chat_url:
         return _err(502, "No upstream base URL configured (set CX2CC_UPSTREAM_BASE_URL)")
@@ -427,7 +433,8 @@ def _handle_nonstream(openai_body: dict, display_model: str, api_key: str = "", 
         _record_key_ok(key)
         try:
             anthropic_resp = translate_response(
-                upstream.json(), display_model, use_upstream_model=_report_upstream_model()
+                upstream.json(), display_model, use_upstream_model=_report_upstream_model(),
+                tool_schemas=tool_schemas,
             )
         except Exception:
             log.exception("Response translation failed")

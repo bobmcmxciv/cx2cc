@@ -10,6 +10,7 @@ from translator import (
     request_diag,
     resolve_model,
     stream_translate,
+    tool_arg_schemas,
     translate_request,
     translate_response,
 )
@@ -342,7 +343,7 @@ def test_missing_tool_use_id_fallback_is_deterministic(monkeypatch):
 
 
 def _diag_marks(diag):
-    marks = diag.split("h[", 1)[1].rstrip("]").split()
+    marks = diag.split("h[", 1)[1].split("]", 1)[0].split()
     return dict(m.split(":") for m in marks)
 
 
@@ -632,3 +633,228 @@ def test_empty_in_conversation_system_message_is_dropped(monkeypatch):
         {"role": "system", "content": [{"type": "text", "text": "  "}]},
     ]})
     assert result["messages"] == [{"role": "user", "content": "hi"}]
+
+
+# Claude Code's Read schema (abridged): only file_path is required.
+READ_TOOL = {
+    "name": "Read",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "file_path": {"type": "string"},
+            "offset": {"type": "integer"},
+            "limit": {"type": "integer"},
+            "pages": {"type": "string"},
+        },
+        "required": ["file_path"],
+    },
+}
+EDIT_TOOL = {
+    "name": "Edit",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "file_path": {"type": "string"},
+            "old_string": {"type": "string"},
+            "new_string": {"type": "string"},
+            "replace_all": {"type": "boolean"},
+        },
+        "required": ["file_path", "old_string", "new_string"],
+    },
+}
+
+
+def _tool_call_body(name, args):
+    return {
+        "choices": [{
+            "finish_reason": "tool_calls",
+            "message": {"content": None, "tool_calls": [
+                {"id": "call_1", "function": {"name": name, "arguments": json.dumps(args)}},
+            ]},
+        }],
+        "usage": {},
+    }
+
+
+WRITE_TOOL = {"name": "Write", "input_schema": {
+    "properties": {"file_path": {"type": "string"}, "content": {"type": "string"}},
+    "required": ["file_path", "content"]}}
+
+
+def test_tool_arg_schemas_lists_every_optional_property():
+    schemas = tool_arg_schemas([READ_TOOL, EDIT_TOOL, WRITE_TOOL])
+    assert schemas == {"Read": {"offset", "limit", "pages"}, "Edit": {"replace_all"}}
+
+
+def test_tool_arg_schemas_without_nullable_optionals_lists_only_strings(monkeypatch):
+    monkeypatch.setenv("CX2CC_NULLABLE_OPTIONALS", "off")
+    assert tool_arg_schemas([READ_TOOL, EDIT_TOOL, WRITE_TOOL]) == {"Read": {"pages"}}
+
+
+def test_optional_properties_are_offered_as_nullable(monkeypatch):
+    monkeypatch.setenv("CX2CC_STYLE", "off")
+    agent = {"name": "Agent", "input_schema": {"type": "object", "properties": {
+        "prompt": {"type": "string"},
+        "isolation": {"type": "string", "enum": ["worktree", "remote"], "description": "Isolation mode."},
+        "run_in_background": {"type": "boolean"},
+        "target": {"anyOf": [{"type": "string"}, {"type": "integer"}]},
+    }, "required": ["prompt"]}}
+    params = translate_request({"model": "gpt-6-luna", "messages": [{"role": "user", "content": "x"}],
+                                "tools": [agent]})["tools"][0]["function"]["parameters"]
+    props = params["properties"]
+    assert props["prompt"] == {"type": "string"}
+    assert props["isolation"]["type"] == ["string", "null"]
+    assert props["isolation"]["enum"] == ["worktree", "remote", None]
+    assert props["isolation"]["description"].startswith("Isolation mode. Optional: pass null")
+    assert props["run_in_background"]["type"] == ["boolean", "null"]
+    assert props["target"]["anyOf"][-1] == {"type": "null"}
+    assert params["required"] == ["prompt"]
+    assert agent["input_schema"]["properties"]["isolation"]["enum"] == ["worktree", "remote"]  # not mutated
+
+
+def test_nullable_optionals_can_be_switched_off(monkeypatch):
+    monkeypatch.setenv("CX2CC_NULLABLE_OPTIONALS", "off")
+    params = translate_request({"model": "gpt-6-luna", "messages": [{"role": "user", "content": "x"}],
+                                "tools": [READ_TOOL]})["tools"][0]["function"]["parameters"]
+    assert params == READ_TOOL["input_schema"]
+
+
+def test_null_optional_arguments_of_any_type_are_dropped():
+    body = _tool_call_body("Edit", {"file_path": "a", "old_string": "x", "new_string": "y", "replace_all": None})
+    result = translate_response(body, tool_schemas=tool_arg_schemas([EDIT_TOOL]))
+    assert result["content"][0]["input"] == {"file_path": "a", "old_string": "x", "new_string": "y"}
+
+
+def test_empty_optional_argument_is_dropped():
+    # gpt-6-luna / gpt-6.1-sol fill every property; `pages: ""` makes Claude
+    # Code reject the Read, so the screenshot never reaches the model.
+    body = _tool_call_body("Read", {"file_path": "a.png", "offset": 0, "limit": 2000, "pages": ""})
+    result = translate_response(body, tool_schemas=tool_arg_schemas([READ_TOOL]))
+    assert result["content"][0]["input"] == {"file_path": "a.png", "offset": 0, "limit": 2000}
+
+
+def test_blank_and_null_optional_arguments_are_dropped_but_values_kept():
+    schemas = tool_arg_schemas([READ_TOOL])
+    for pages in (" ", None):
+        body = _tool_call_body("Read", {"file_path": "a.pdf", "pages": pages})
+        assert translate_response(body, tool_schemas=schemas)["content"][0]["input"] == {"file_path": "a.pdf"}
+    body = _tool_call_body("Read", {"file_path": "a.pdf", "pages": "1-3"})
+    assert translate_response(body, tool_schemas=schemas)["content"][0]["input"]["pages"] == "1-3"
+
+
+def test_empty_required_argument_is_kept():
+    body = _tool_call_body("Edit", {"file_path": "a", "old_string": "x", "new_string": "", "replace_all": False})
+    result = translate_response(body, tool_schemas=tool_arg_schemas([READ_TOOL, EDIT_TOOL]))
+    assert result["content"][0]["input"]["new_string"] == ""
+
+
+def _stream_tool_lines(name, arg_pieces, call_id="call_1"):
+    lines = ['data: ' + json.dumps({"choices": [{"delta": {"tool_calls": [
+        {"index": 0, "id": call_id, "type": "function", "function": {"name": name, "arguments": ""}}]}}]})]
+    for piece in arg_pieces:
+        lines.append('data: ' + json.dumps({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "function": {"arguments": piece}}]}}]}))
+    lines.append('data: ' + json.dumps({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}))
+    lines.append("data: [DONE]")
+    return lines
+
+
+def _streamed_input(events, index=0):
+    parts = [d["delta"]["partial_json"] for e, d in events
+             if e == "content_block_delta" and d["index"] == index and d["delta"]["type"] == "input_json_delta"]
+    return parts
+
+
+def test_stream_cleans_buffered_tool_arguments():
+    lines = _stream_tool_lines("Read", ['{"file_path": "a.png", "off', 'set": 0, "pages": ""}'])
+    events = event_payloads(list(stream_translate(
+        FakeStreamResponse(lines), tool_schemas=tool_arg_schemas([READ_TOOL]))))
+    parts = _streamed_input(events)
+    assert len(parts) == 1
+    assert json.loads(parts[0]) == {"file_path": "a.png", "offset": 0}
+    kinds = [e for e, _ in events]
+    assert kinds.index("content_block_delta") < kinds.index("content_block_stop")
+    assert events[-2][1]["delta"]["stop_reason"] == "tool_use"
+
+
+def test_stream_tools_without_optional_properties_still_stream_unbuffered():
+    pieces = ['{"file_path": "a", ', '"content": "x"}']
+    events = event_payloads(list(stream_translate(
+        FakeStreamResponse(_stream_tool_lines("Write", pieces)),
+        tool_schemas=tool_arg_schemas([READ_TOOL, EDIT_TOOL, WRITE_TOOL]))))
+    assert _streamed_input(events) == pieces
+
+
+def test_stream_buffered_tool_flushes_before_following_text():
+    lines = _stream_tool_lines("Read", ['{"file_path": "a.png", "pages": ""}'])[:-2]
+    lines += ['data: {"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}', "data: [DONE]"]
+    events = event_payloads(list(stream_translate(
+        FakeStreamResponse(lines), tool_schemas=tool_arg_schemas([READ_TOOL]))))
+    assert json.loads(_streamed_input(events, 0)[0]) == {"file_path": "a.png"}
+    stop0 = next(i for i, (e, d) in enumerate(events) if e == "content_block_stop" and d["index"] == 0)
+    text_start = next(i for i, (e, d) in enumerate(events)
+                      if e == "content_block_start" and d["content_block"]["type"] == "text")
+    assert stop0 < text_start
+    assert events[text_start][1]["index"] == 1
+
+
+# --- reasoning carry-over -------------------------------------------------
+
+def test_stream_reasoning_item_becomes_a_thinking_block_before_the_tool():
+    lines = ['data: ' + json.dumps({"choices": [{"delta": {"reasoning_items": [
+        {"encrypted_content": "gAAAA-enc", "summary": [{"type": "summary_text", "text": "plan"}]}]}}]})]
+    lines += _stream_tool_lines("lookup", ['{"id": 1}'])
+    events = event_payloads(list(stream_translate(FakeStreamResponse(lines))))
+    starts = [(d["index"], d["content_block"]["type"]) for e, d in events if e == "content_block_start"]
+    assert starts == [(0, "thinking"), (1, "tool_use")]
+    deltas = [d["delta"] for e, d in events if e == "content_block_delta" and d["index"] == 0]
+    assert deltas == [
+        {"type": "thinking_delta", "thinking": "plan"},
+        {"type": "signature_delta", "signature": "cx2cc-rs1:gAAAA-enc"},
+    ]
+
+
+def test_nonstream_reasoning_item_becomes_a_thinking_block():
+    body = _tool_call_body("lookup", {"id": 1})
+    body["choices"][0]["message"]["reasoning_items"] = [{"encrypted_content": "gAAAA-enc", "summary": []}]
+    content = translate_response(body)["content"]
+    assert content[0] == {"type": "thinking", "thinking": "", "signature": "cx2cc-rs1:gAAAA-enc"}
+    assert content[1]["type"] == "tool_use"
+
+
+def _assistant_with_thinking(signature):
+    return {
+        "model": "gpt-6-luna",
+        "messages": [
+            {"role": "user", "content": "go"},
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "", "signature": signature},
+                {"type": "tool_use", "id": "call_1", "name": "lookup", "input": {"id": 1}},
+            ]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": "ok"}]},
+        ],
+    }
+
+
+def test_our_thinking_block_is_replayed_as_reasoning_items(monkeypatch):
+    monkeypatch.setenv("CX2CC_STYLE", "off")
+    out = translate_request(_assistant_with_thinking("cx2cc-rs1:gAAAA-enc"))
+    assistant = next(m for m in out["messages"] if m["role"] == "assistant")
+    assert assistant["reasoning_items"] == [{"encrypted_content": "gAAAA-enc"}]
+    assert assistant["tool_calls"][0]["id"] == "call_1"
+
+
+def test_foreign_thinking_block_is_still_dropped(monkeypatch):
+    monkeypatch.setenv("CX2CC_STYLE", "off")
+    out = translate_request(_assistant_with_thinking("EqQBCkgIBhABGAIiQ-anthropic-sig"))
+    assistant = next(m for m in out["messages"] if m["role"] == "assistant")
+    assert "reasoning_items" not in assistant
+
+
+def test_reasoning_replay_can_be_switched_off(monkeypatch):
+    monkeypatch.setenv("CX2CC_REASONING_REPLAY", "off")
+    out = translate_request(_assistant_with_thinking("cx2cc-rs1:gAAAA-enc"))
+    assert all("reasoning_items" not in m for m in out["messages"])
+    body = _tool_call_body("lookup", {"id": 1})
+    body["choices"][0]["message"]["reasoning_items"] = [{"encrypted_content": "x"}]
+    assert translate_response(body)["content"][0]["type"] == "tool_use"
